@@ -1,0 +1,40 @@
+name: Windows build
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Bootstrap
+        shell: pwsh
+        run: ./scripts/bootstrap.ps1
+      - name: Lint and tests
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          ./.venv/Scripts/python.exe -m ruff check .
+          ./.venv/Scripts/python.exe -m pytest -q
+      - name: Fetch verified tools
+        shell: pwsh
+        run: ./scripts/fetch-tools.ps1
+      - name: Build portable
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - name: Build installer
+        shell: pwsh
+        run: |
+          ./scripts/install-inno.ps1
+          ./scripts/make-installer.ps1
+      - name: Smoke checks
+        shell: pwsh
+        run: ./scripts/smoke-test.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ALMedia-windows-x64
+          path: |
+            dist/ALMedia-*-portable-win-x64.zip
+            dist/ALMedia-*-Setup-win-x64.exe
+            dist/SHA256SUMS.txt

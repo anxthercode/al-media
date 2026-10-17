@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools==84.0.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "al-media"
+description = "AL Media (AnyLoad Media) — desktop video and audio downloader"
+readme = "README.md"
+license = "MIT"
+dynamic = ["version"]
+requires-python = ">=3.12,<3.13"
+dependencies = ["PySide6-Essentials==6.12.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pytest-qt>=4.4,<5", "ruff>=0.9,<1", "PyInstaller>=6.11,<7"]
+
+[tool.setuptools.dynamic]
+version = {attr = "al_media.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 240
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

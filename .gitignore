@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+tools/bin/
+tools/*.exe
+.tmp/
+*.sqlite3
+/data/
+/portable.flag
+.env
+.env.*
+*.part
+*.ytdl
+
+# Local design explorations; the selected logo is assets/app.png + assets/app.ico.
+/assets/icon-concepts/
+/assets/app-icon-*
