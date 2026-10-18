@@ -24,7 +24,9 @@ else:
         time.sleep(60)
     folder = Path(args[args.index("--paths") + 1])
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / "Пример [id].mp4"
+    template = args[args.index("-o") + 1]
+    filename = template.replace("%(ext)s", "mp4").replace("%(title).180B", "Пример").replace("%(id)s", "id").replace("%%", "%")
+    path = folder / filename
     path.write_bytes(b"fixture media")
     print("ALM_PROGRESS:download|5|10|NA|100|1|50", flush=True)
     print("ALM_PROGRESS:postprocess|NA|NA|NA|NA|NA|NA", flush=True)

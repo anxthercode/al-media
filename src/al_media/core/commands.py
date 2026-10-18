@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -22,24 +24,62 @@ def metadata_args(url: str, tools: dict[str, Path], preferences: Preferences, pl
 
 
 def download_args(task: Task, tools: dict[str, Path], preferences: Preferences) -> list[str]:
+    output = task.output_stem.replace("%", "%%") + ".%(ext)s" if task.output_stem else f"%(title).180B [%(id)s] [{task.id[:8]}].%(ext)s"
     args = [*common_args(tools, preferences), "--yes-playlist" if task.playlist else "--no-playlist",
             "--newline", "--progress", "--no-simulate", "--no-overwrites", "--continue", "--part", "--paths", task.folder,
-            "-o", f"%(title).180B [%(id)s] [{task.id[:8]}].%(ext)s",
+            "-o", output, "--windows-filenames",
             "--progress-template", "download:ALM_PROGRESS:download|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s|%(progress._percent_str)s",
             "--progress-template", "postprocess:ALM_PROGRESS:postprocess|NA|NA|NA|NA|NA|NA",
             "--print", "before_dl:ALM_INFO:%(.{id,title,extractor_key,uploader,duration})j",
             "--print", "after_move:ALM_FILE:%(filepath)j"]
+    language = ""
+    if task.audio_language:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", task.audio_language):
+            raise ValueError("Invalid audio language")
+        language = f"[language={task.audio_language}]"
+    if task.audio_track_ids:
+        if any(not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", value) for value in task.audio_track_ids):
+            raise ValueError("Invalid audio track")
+        pattern = "|".join(re.escape(value) for value in task.audio_track_ids)
+        language = f"[format_id~='^(?:{pattern})$']"
+    audio = f"bestaudio{language}/best{language}"
     if task.selection.startswith("mp3:"):
-        args += ["-f", "bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", task.selection.split(":")[1] + "K"]
+        rate = int(task.selection.split(":")[1])
+        if rate not in {128, 192, 320}:
+            raise ValueError("Invalid MP3 bitrate")
+        args += ["-f", f"bestaudio[ext=mp3]{language}/{audio}", "-x", "--audio-format", "mp3", "--audio-quality", f"{rate}K"]
     elif task.selection == "audio":
-        args += ["-f", "bestaudio/best", "-x"]
+        args += ["-f", audio, "-x"]
     elif task.selection == "m4a":
-        args += ["-f", "bestaudio[ext=m4a]"]
+        args += ["-f", f"bestaudio[ext=m4a]{language}"]
     elif task.selection == "mp4":
         args += ["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best", "--merge-output-format", "mp4"]
     elif task.selection.startswith("video:"):
         limit = int(task.selection.split(":")[1])
-        args += ["-f", f"bv*[height<={limit}]+ba/b[height<={limit}]", "--merge-output-format", "mkv/mp4"]
+        video = "bv" if language else "bv*"
+        args += ["-f", f"{video}[height<={limit}]+ba{language}/b[height<={limit}]{language}", "--merge-output-format", "mkv/mp4"]
     else:
-        args += ["-f", "bv*+ba/b", "--merge-output-format", "mkv/mp4"]
+        args += ["-f", f"bv+ba{language}/b{language}" if language else "bv*+ba/b", "--merge-output-format", "mkv/mp4"]
+    is_audio = task.selection in {"audio", "m4a"} or task.selection.startswith("mp3:")
+    if is_audio and preferences.music_tags:
+        args += ["--embed-metadata", "--no-embed-info-json"]
+    if is_audio and preferences.music_cover and task.thumbnail:
+        args += ["--embed-thumbnail", "--convert-thumbnails", "jpg"]
+    clipping = task.clip_start is not None or task.clip_end is not None
+    if clipping:
+        start, end = task.clip_start or 0, task.clip_end
+        if not math.isfinite(start) or start < 0 or end is not None and (not math.isfinite(end) or end <= start):
+            raise ValueError("Invalid time range")
+        args += ["--download-sections", f"*{start:g}-" + (f"{end:g}" if end is not None else "inf")]
+        if not is_audio:
+            args += ["--force-keyframes-at-cuts"]
+    if task.subtitle_language and task.subtitle_mode != "none":
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", task.subtitle_language):
+            raise ValueError("Invalid subtitle language")
+        args += ["--write-auto-subs" if task.subtitle_auto else "--write-subs", "--sub-langs", re.escape(task.subtitle_language),
+                 "--sub-format", "srt/vtt/best", "--convert-subs", "srt"]
+        if task.subtitle_mode == "embedded" and not is_audio:
+            args += ["--remux-video", "mkv"]
+            if not clipping:
+                args += ["--embed-subs"]
     return [*args, "--", task.url]

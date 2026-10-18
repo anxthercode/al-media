@@ -1,3 +1,4 @@
+param([switch]$Incremental)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -10,7 +11,9 @@ try {
     foreach ($name in @('yt-dlp.exe', 'ffmpeg.exe', 'ffprobe.exe', 'deno.exe')) {
         if (-not (Test-Path (Join-Path 'tools' $name))) { throw "Run scripts/fetch-tools.ps1 first: $name missing" }
     }
-    & .\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm packaging\ALMedia.spec
+    $packagerArgs = @('-m', 'PyInstaller', '--noconfirm', 'packaging\ALMedia.spec')
+    if (-not $Incremental) { $packagerArgs += '--clean' }
+    & .\.venv\Scripts\python.exe @packagerArgs
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
     $tree = Join-Path $root 'dist\ALMedia'
     $runtime = Join-Path $tree '_runtime_v2'

@@ -1,277 +1,160 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
     QComboBox,
-    QFileDialog,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QStackedWidget,
-    QTextEdit,
+    QStyledItemDelegate,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
-from al_media import APP_FULL_NAME, APP_NAME, __version__
-from al_media.config import Preferences, app_root, data_root
-from al_media.core.metadata import parse_urls
+from al_media import APP_NAME, __version__
+from al_media.config import Preferences, app_root
+from al_media.core.engine import EngineJob
+from al_media.core.metadata import available_selections, estimate_size, parse_urls, populate_task
 from al_media.core.scheduler import Scheduler
-from al_media.core.tools import bundled_tools
-from al_media.i18n import format_label, tr
+from al_media.core.source_probe import SourceProbe
+from al_media.i18n import tr
 from al_media.models import State, Task
 
+from .composer import downloads_page
+from .media_preview import ImageCache
+from .pages import about_page, settings_page
+from .selection import default_selection
 from .task_card import BUSY, TaskCard
-from .themes import stylesheet
-
-
-class UrlInput(QTextEdit):
-    entered = Signal()
-
-    def keyPressEvent(self, event: object) -> None:
-        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter} and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            self.entered.emit()
-            event.accept()
-        else:
-            super().keyPressEvent(event)
+from .themes import palette, stylesheet
+from .widgets import open_local, svg_icon
 
 
 class MainWindow(QMainWindow):
     def __init__(self, scheduler: Scheduler, preferences: Preferences, probe_tools: bool = True):
         super().__init__()
         self.scheduler, self.preferences = scheduler, preferences
-        self.cards: dict[str, TaskCard] = {}
-        self.network = QNetworkAccessManager(self)
+        self.cards = {}
+        self.texts, self.icon_buttons, self.preview_jobs = [], [], []
+        self.images = ImageCache(self)
+        self.source_probe = SourceProbe(scheduler.tools.get("ffprobe"), self)
+        self.source_probe.updated.connect(self._source_probe_ready)
+        self.preview_task = None
+        self.selected_task_id = ""
+        self.explicit_exit = False
+        self.preview_job = None
+        self.preview_url = ""
         self.installing = False
-        self.texts = []
+        self.closing = False
+        self.settings_loading = True
         self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(QIcon(str(app_root() / "assets" / "app.ico")))
-        self.resize(1180, 800)
-        self.setMinimumSize(940, 640)
+        self.setWindowIcon(QIcon(str(app_root() / "assets/app.ico")))
+        self.setMinimumSize(960, 640)
+        screen = QApplication.primaryScreen()
+        area = screen.availableGeometry() if screen else None
+        self.resize(min(1200, max(960, area.width() - 24)) if area else 1200,
+                    min(840, max(640, area.height() - 48)) if area else 840)
         self.setAcceptDrops(True)
         shell = QWidget()
         shell.setObjectName("shell")
         self.setCentralWidget(shell)
-        root = QVBoxLayout(shell)
+        root = QHBoxLayout(shell)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        top = QFrame()
-        top.setObjectName("topbar")
-        top_row = QHBoxLayout(top)
-        top_row.setContentsMargins(20, 15, 20, 15)
-        brand_box = QWidget()
-        brand_box.setFixedWidth(180)
-        brand_row = QHBoxLayout(brand_box)
-        brand_row.setContentsMargins(0, 0, 0, 0)
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(184)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(0, 0, 0, 12)
+        side.setSpacing(8)
+        brand_header = QFrame()
+        brand_header.setObjectName("brandHeader")
+        brand_header.setFixedHeight(64)
+        brand_row = QHBoxLayout(brand_header)
+        brand_row.setContentsMargins(20, 0, 16, 0)
         brand_row.setSpacing(10)
         brand_icon = QLabel()
-        brand_icon.setPixmap(self.windowIcon().pixmap(28, 28))
+        brand_icon.setPixmap(self.windowIcon().pixmap(QSize(28, 28), self.devicePixelRatioF()))
         brand_row.addWidget(brand_icon)
         brand = QLabel(APP_NAME)
         brand.setObjectName("brand")
-        brand_row.addWidget(brand)
-        brand_row.addStretch()
-        top_row.addWidget(brand_box)
-        self.input = UrlInput()
-        self.input.setAcceptRichText(False)
-        self.input.setFixedHeight(44)
-        self.input.entered.connect(self._add_urls)
-        top_row.addWidget(self.input, 1)
-        self.paste_button = self._button("paste", self._paste)
-        top_row.addWidget(self.paste_button)
-        self.quality_button = self._button("choose_quality", lambda: self._add_urls(download=False))
-        top_row.addWidget(self.quality_button)
-        self.add_button = self._button("download_now", self._add_urls, primary=True)
-        top_row.addWidget(self.add_button)
-        root.addWidget(top)
-        outer = QHBoxLayout()
+        brand_row.addWidget(brand, 1)
+        side.addWidget(brand_header)
+        side.addSpacing(12)
+        self.nav = QButtonGroup(self)
+        self.nav_buttons = []
+        for index, (key, icon) in enumerate((("downloads", "download"), ("settings", "settings"), ("about", "info"))):
+            if index == 2:
+                side.addStretch()
+            button = self._button(key, lambda _checked=False, page=index: self._navigate(page), icon=icon)
+            button.setObjectName("nav")
+            button.setCheckable(True)
+            self.nav.addButton(button, index)
+            self.nav_buttons.append(button)
+            wrap = QWidget()
+            row = QHBoxLayout(wrap)
+            row.setContentsMargins(12, 0, 12, 0)
+            row.addWidget(button)
+            side.addWidget(wrap)
+        root.addWidget(sidebar)
+        workspace = QWidget()
+        outer = QVBoxLayout(workspace)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        sidebar = QFrame()
-        sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(195)
-        side = QVBoxLayout(sidebar)
-        side.setContentsMargins(12, 20, 12, 18)
-        self.nav = QListWidget()
-        self.nav.setObjectName("navigation")
-        self.nav.setSpacing(4)
-        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.nav.currentRowChanged.connect(self._navigate)
-        side.addWidget(self.nav)
-        side.addWidget(self._label("local_app", "muted"))
-        version = QLabel(f"v{__version__}  ·  yt-dlp")
-        version.setObjectName("muted")
-        side.addWidget(version)
-        outer.addWidget(sidebar)
+        header = QFrame()
+        header.setObjectName("pageHeader")
+        header.setFixedHeight(64)
+        heading = QHBoxLayout(header)
+        heading.setContentsMargins(24, 0, 24, 0)
+        self.page_title = QLabel()
+        self.page_title.setObjectName("pageTitle")
+        heading.addWidget(self.page_title, 1)
+        outer.addWidget(header)
         self.stack = QStackedWidget()
         outer.addWidget(self.stack, 1)
-        root.addLayout(outer, 1)
-
-        self.download_page, dl = self._page("downloads", "downloads_hint")
-        title_row = QHBoxLayout()
-        self.queue_summary = QLabel()
-        self.queue_summary.setObjectName("muted")
-        title_row.addWidget(self.queue_summary, 1)
-        self.import_button = self._button("import_links", self._import_links)
-        title_row.addWidget(self.import_button)
-        dl.addLayout(title_row)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body = QWidget()
-        body.setObjectName("scrollBody")
-        self.cards_layout = QVBoxLayout(body)
-        self.cards_layout.setContentsMargins(0, 0, 8, 0)
-        self.cards_layout.setSpacing(12)
-        self.cards_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.empty_panel = QFrame()
-        self.empty_panel.setObjectName("panel")
-        empty = QVBoxLayout(self.empty_panel)
-        empty.setContentsMargins(28, 55, 28, 55)
-        empty.setSpacing(18)
-        empty_icon = QLabel()
-        empty_icon.setPixmap(self.windowIcon().pixmap(64, 64))
-        empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.addWidget(empty_icon)
-        self.empty_label = self._label("empty", "sectionTitle")
-        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.addWidget(self.empty_label)
-        hint = self._label("empty_hint", "muted")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.addWidget(hint)
-        actions = QHBoxLayout()
-        actions.addStretch()
-        actions.addWidget(self._button("paste", self._paste, primary=True))
-        actions.addWidget(self._button("import_links", self._import_links))
-        actions.addStretch()
-        empty.addLayout(actions)
-        sites = QLabel("YouTube  ·  VK  ·  TikTok  ·  Vimeo  ·  Instagram")
-        sites.setObjectName("muted")
-        sites.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.addWidget(sites)
-        self.cards_layout.addWidget(self.empty_panel)
-        scroll.setWidget(body)
-        dl.addWidget(scroll, 1)
-        footer = QHBoxLayout()
-        self.all_button = self._button("all", self._download_all, primary=True)
-        self.stop_button = self._button("stop_all", self._stop_all)
-        self.clear_button = self._button("clear_completed", self._clear_completed)
-        footer.addWidget(self.all_button)
-        footer.addWidget(self.stop_button)
-        footer.addWidget(self.clear_button)
-        footer.addStretch()
-        footer.addWidget(self._button("destination", self._open_downloads))
-        dl.addLayout(footer)
-        self.stack.addWidget(self.download_page)
-
-        self.history_page, history = self._page("history", "history_hint")
-        self.history_search = QLineEdit()
-        self.history_search.textChanged.connect(self._refresh_history)
-        history.addWidget(self.history_search)
-        self.history_list = QListWidget()
-        self.history_list.setSpacing(4)
-        self.history_list.itemDoubleClicked.connect(self._open_history_item)
-        history.addWidget(self.history_list, 1)
-        self.history_empty = self._label("history_empty", "muted")
-        history.addWidget(self.history_empty)
-        history_actions = QHBoxLayout()
-        history_actions.addWidget(self._button("open", lambda: self._history_open(False)))
-        history_actions.addWidget(self._button("folder", lambda: self._history_open(True)))
-        history_actions.addStretch()
-        history.addLayout(history_actions)
-        self.stack.addWidget(self.history_page)
-
-        self.settings_page, settings = self._page("settings", "settings_hint")
-        self.settings_page.setMaximumWidth(1050)
-        general, form = self._form_panel(settings, "general")
-        self.path_edit = QLineEdit(preferences.folder)
-        self.choose_button = self._button("choose", self._choose_folder)
-        path_row = QHBoxLayout()
-        path_row.addWidget(self.path_edit, 1)
-        path_row.addWidget(self.choose_button)
-        form.addRow(self._label("path"), path_row)
-        self.theme = QComboBox()
-        for key in ("dark", "light"):
-            self.theme.addItem(tr(preferences.language, key), key)
-        self.theme.setCurrentIndex(max(0, self.theme.findData(preferences.theme)))
-        self.language = QComboBox()
-        for name, key in (("Русский", "ru"), ("English", "en"), ("Українська", "uk")):
-            self.language.addItem(name, key)
-        self.language.setCurrentIndex(max(0, self.language.findData(preferences.language)))
-        appearance = QHBoxLayout()
-        appearance.addWidget(self.theme)
-        appearance.addWidget(self.language)
-        form.addRow(self._label("appearance"), appearance)
-
-        save_row = QHBoxLayout()
-        self.save_button = self._button("save", self._save_settings, primary=True)
-        save_row.addWidget(self.save_button)
-        self.save_status = QLabel()
-        self.save_status.setObjectName("muted")
-        save_row.addWidget(self.save_status, 1)
-        settings.addStretch()
-        self.settings_scroll = QScrollArea()
-        self.settings_scroll.setWidgetResizable(True)
-        self.settings_scroll.setWidget(self.settings_page)
-        settings_wrapper = QWidget()
-        settings_outer = QVBoxLayout(settings_wrapper)
-        settings_outer.setContentsMargins(0, 0, 0, 0)
-        settings_outer.addWidget(self.settings_scroll, 1)
-        save_row.setContentsMargins(26, 8, 22, 22)
-        settings_outer.addLayout(save_row)
-        self.stack.addWidget(settings_wrapper)
-
-        self.about_page, about = self._page("about", "about_hint")
-        panel = QFrame()
-        panel.setObjectName("panel")
-        content = QVBoxLayout(panel)
-        content.setContentsMargins(28, 28, 28, 28)
-        about_icon = QLabel()
-        about_icon.setPixmap(self.windowIcon().pixmap(80, 80))
-        content.addWidget(about_icon, 0, Qt.AlignmentFlag.AlignLeft)
-        title = QLabel(APP_NAME)
-        title.setObjectName("pageTitle")
-        content.addWidget(title)
-        full_name = QLabel(APP_FULL_NAME)
-        full_name.setObjectName("muted")
-        content.addWidget(full_name)
-        version = QLabel(f"v{__version__}")
-        version.setObjectName("badge")
-        content.addWidget(version, 0, Qt.AlignmentFlag.AlignLeft)
-        content.addWidget(self._label("about_description", "muted"))
-        tools = bundled_tools()
-        missing = [name for name, path in tools.items() if not path.is_file()]
-        self.tool_status = self._label("tools_missing" if missing else "tools_ready", "muted")
-        if missing:
-            self.tool_status.setToolTip(", ".join(missing))
-        content.addWidget(self.tool_status)
-        self.logs_button = self._button("logs", self._open_logs)
-        content.addWidget(self.logs_button, 0, Qt.AlignmentFlag.AlignLeft)
-        about.addWidget(panel)
-        about.addStretch()
-        self.stack.addWidget(self.about_page)
+        root.addWidget(workspace, 1)
+        self.download_page = self._downloads_page()
+        self.settings_page = settings_page(self)
+        self.about_page = about_page(self)
+        for page in (self.download_page, self.settings_page, self.about_page):
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setWidget(page)
+            self.stack.addWidget(scroll)
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.setInterval(650)
+        self.preview_timer.timeout.connect(self._analyze_input)
+        self.input.textChanged.connect(self._input_changed)
+        self.input.returnPressed.connect(self._add_urls)
+        self._setup_tray()
+        self.settings_loading = False
         self._translate()
-        self.nav.setCurrentRow(0)
-        self.setStyleSheet(stylesheet(preferences.theme))
+        self._apply_appearance()
+        self._navigate(0)
         scheduler.changed.connect(self._task_changed)
         scheduler.removed.connect(self._task_removed)
-        for task in reversed(list(scheduler.tasks.values())):
+        if hasattr(scheduler, "queue_finished"):
+            scheduler.queue_finished.connect(self._queue_finished)
+        for task in scheduler.tasks.values():
             if not task.hidden:
                 self._task_changed(task)
         self._queue_status()
+        QApplication.instance().styleHints().colorSchemeChanged.connect(self._system_theme_changed)
 
     def _label(self, key, style=""):
         label = QLabel()
@@ -281,272 +164,625 @@ class MainWindow(QMainWindow):
         self.texts.append((label, key))
         return label
 
-    def _button(self, key, callback, primary=False):
+    def _button(self, key, callback, primary=False, icon=""):
         button = QPushButton()
+        button.setMinimumHeight(32)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setIconSize(QSize(18, 18))
         if primary:
             button.setObjectName("primary")
         button.clicked.connect(callback)
         self.texts.append((button, key))
+        if icon:
+            self.icon_buttons.append((button, icon, primary))
         return button
 
-    def _page(self, title, hint):
+    @staticmethod
+    def _page():
         page = QWidget()
         page.setObjectName("page")
+        page.setMaximumWidth(1472)
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(26, 24, 22, 22)
-        layout.setSpacing(14)
-        layout.addWidget(self._label(title, "pageTitle"))
-        layout.addWidget(self._label(hint, "muted"))
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
         return page, layout
 
-    def _form_panel(self, layout, title):
-        panel = QFrame()
-        panel.setObjectName("panel")
-        inside = QVBoxLayout(panel)
-        inside.setContentsMargins(20, 18, 20, 18)
-        inside.setSpacing(14)
-        inside.addWidget(self._label(title, "sectionTitle"))
-        form = QFormLayout()
-        form.setHorizontalSpacing(20)
-        form.setVerticalSpacing(10)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        inside.addLayout(form)
-        layout.addWidget(panel)
-        return panel, form
+    def _downloads_page(self):
+        return downloads_page(self)
 
     def _translate(self):
-        language = self.preferences.language
-        for form in self.settings_page.findChildren(QFormLayout):
-            for row in range(form.rowCount()):
-                item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
-                if item and isinstance(item.widget(), QLabel):
-                    item.widget().setFixedWidth(175)
+        lang = self.preferences.language
         for widget, key in self.texts:
-            widget.setText(tr(language, key))
-        for index, key in enumerate(("downloads", "history", "settings", "about")):
-            if self.nav.count() <= index:
-                self.nav.addItem(tr(language, key))
-            else:
-                self.nav.item(index).setText(tr(language, key))
-        self.input.setPlaceholderText(tr(language, "input_hint"))
-        self.input.setAccessibleName(tr(language, "input_hint"))
-        self.history_search.setPlaceholderText(tr(language, "search_history"))
-        for index in range(self.theme.count()):
-            self.theme.setItemText(index, tr(language, self.theme.itemData(index)))
+            widget.setText(tr(lang, key))
+        for combo, keys in ((self.theme, ("system", "dark", "light")), (self.name_style, ("title_name", "artist_title")),
+                            (self.subfolders, ("none", "by_source", "by_author", "by_playlist"))):
+            combo.blockSignals(True)
+            for index, key in enumerate(keys):
+                combo.setItemText(index, tr(lang, key))
+            combo.blockSignals(False)
+        self.input.setAccessibleName(tr(lang, "link"))
+        self.page_title.setText(tr(lang, ("downloads", "settings", "about")[max(0, self.stack.currentIndex())]))
+        self.format_picker.render()
+        self._sync_disclosure()
+        self.version_label.setText(f"{tr(lang, 'version')} {__version__}")
         for task in self.scheduler.tasks.values():
             if task.id in self.cards:
                 self.cards[task.id].render(task)
+        for action, key in ((self.show_action, "show_window"), (self.quit_action, "exit")):
+            action.setText(tr(lang, key))
+        self._render_preview()
         self._queue_status()
 
-    def _navigate(self, index: int) -> None:
-        if index >= 0:
-            self.stack.setCurrentIndex(index)
-            if index == 1:
-                self._refresh_history()
+    def _apply_appearance(self):
+        c = palette(self.preferences.theme)
+        self.setStyleSheet(stylesheet(self.preferences.theme))
+        input_colors = self.input.palette()
+        input_colors.setColor(QPalette.ColorRole.PlaceholderText, QColor(c["muted"]))
+        self.input.setPalette(input_colors)
+        for combo in self.findChildren(QComboBox):
+            if not combo.property("desktopDelegate"):
+                combo.setItemDelegate(QStyledItemDelegate(combo))
+                combo.setProperty("desktopDelegate", True)
+            colors = combo.palette()
+            colors.setColor(QPalette.ColorRole.Highlight, QColor(c["tint"]))
+            colors.setColor(QPalette.ColorRole.HighlightedText, QColor(c["accent"]))
+            colors.setColor(QPalette.ColorRole.Accent, QColor(c["accent"]))
+            for role, key in ((QPalette.ColorRole.Window, "surface"), (QPalette.ColorRole.Base, "surface"),
+                              (QPalette.ColorRole.Text, "text"), (QPalette.ColorRole.WindowText, "text"),
+                              (QPalette.ColorRole.Light, "border"), (QPalette.ColorRole.Dark, "border")):
+                colors.setColor(role, QColor(c[key]))
+            combo.view().setPalette(colors)
+            combo.view().window().setPalette(colors)
+        for button, name, primary in self.icon_buttons:
+            button.setIcon(svg_icon(name, c["on_accent"] if primary else c["muted"]))
+        for label, _name in self.site_icons:
+            label.set_color(c["text"])
+        self.media_preview.update()
+        self.format_picker.render()
+        self._sync_disclosure()
+        for task_id, card in self.cards.items():
+            card.render(self.scheduler.tasks[task_id])
 
-    def _paste(self) -> None:
-        from PySide6.QtWidgets import QApplication
-        self.input.setPlainText(QApplication.clipboard().text())
-        self.input.setFocus()
+    def _system_theme_changed(self, *_):
+        if self.preferences.theme == "system":
+            self._apply_appearance()
 
-    def _add_urls(self, _checked=False, *, download=True) -> None:
-        if self.installing:
+    def _navigate(self, index):
+        self.nav_buttons[index].setChecked(True)
+        self.stack.setCurrentIndex(index)
+        self.page_title.setText(tr(self.preferences.language, ("downloads", "settings", "about")[index]))
+
+    def _input_changed(self):
+        self.preview_timer.stop()
+        self._cancel_preview()
+        self.preview_task = None
+        self.selected_task_id = ""
+        self.format_picker.set_task(None)
+        self.format_picker.setEnabled(True)
+        self.format_picker.modes.setEnabled(True)
+        self.source_panel.hide()
+        self.media_preview.set_task(None)
+        self.media_preview.hide()
+        self.options_editor.set_task(None)
+        self.preview_advanced.setEnabled(False)
+        self.parameter_fields.hide()
+        self.options_popup.hide()
+        self.input_error.hide()
+        valid, invalid = parse_urls(self.input.text())
+        self.add_button.setText(tr(self.preferences.language, "download_now"))
+        self.add_button.setEnabled(len(valid) > 1 and not invalid)
+        self._composer_state("batch" if len(valid) > 1 and not invalid else "loading" if len(valid) == 1 and not invalid else "empty")
+        if len(valid) == 1 and not invalid:
+            self.preview_timer.start()
+
+    def _composer_state(self, state):
+        ready = state == "ready"
+        self.empty_hint.setVisible(state == "empty")
+        self.loading_panel.setVisible(state == "loading")
+        self.analysis_status.setVisible(state == "loading")
+        self.source_layout.setVisible(ready)
+        self.format_picker.modes.setVisible(ready)
+        self.parameter_fields.setVisible(ready)
+        self.add_button.setVisible(ready or state == "batch")
+        if not ready:
+            self.options_popup.hide()
+
+    def _cancel_preview(self):
+        self.source_probe.cancel()
+        job, self.preview_job = self.preview_job, None
+        if job:
+            job.cancel()
+        self.analysis_bar.hide()
+
+    def _analyze_input(self):
+        valid, invalid = parse_urls(self.input.text())
+        if len(valid) != 1 or invalid or self.closing:
             return
-        valid, invalid = parse_urls(self.input.toPlainText())
-        if invalid or not valid:
-            QMessageBox.warning(self, "URL", tr(self.preferences.language, "invalid_links"))
-        for url in valid:
-            self.scheduler.add(url, download=download)
-        if valid:
-            self.input.setPlainText("\n".join(invalid))
-            self.nav.setCurrentRow(0)
+        self._cancel_preview()
+        self.preview_url = valid[0]
+        self.input_error.hide()
+        task = Task(valid[0], folder=self.preferences.folder)
+        try:
+            job = EngineJob(task, self.scheduler.tools, self.preferences, "metadata", self)
+        except KeyError:
+            self._input_failure("error_engine_missing")
+            return
+        self.preview_job = job
+        self.preview_jobs.append(job)
+        job.metadata_ready.connect(lambda _id, info, current=job: self._preview_ready(current, task, info))
+        job.failed.connect(lambda _id, error, current=job: self._preview_failed(current, error))
+        job.finished.connect(lambda _id, current=job: self._preview_finished(current))
+        self._composer_state("loading")
+        self.media_preview.set_task(None)
+        job.start()
 
-    def _download_all(self) -> None:
-        for task in self.scheduler.tasks.values():
+    def _preview_ready(self, job, task, info):
+        if job is not self.preview_job or self.closing:
+            return
+        populate_task(task, info)
+        if not task.playlist and not available_selections({"formats": task.formats}):
+            self._input_failure("error_no_formats")
+            return
+        task.state = State.READY
+        task.selection = default_selection(task, self.preferences)
+        self.preview_task = task
+        self.analysis_bar.hide()
+        self.format_picker.set_task(task)
+        self._render_preview()
+        self.source_probe.start(task)
+
+    def _source_probe_ready(self, task):
+        if not self.closing and task is self.preview_task:
+            self._render_source_facts(task)
+            if self.options_editor.task is task:
+                self.options_editor.end.setPlaceholderText(self.options_editor._time(task.duration))
+            self.media_preview.set_task(task)
+
+    def _preview_failed(self, job, error):
+        if job is self.preview_job and error != "cancelled":
+            self._input_failure(error)
+
+    def _preview_finished(self, job):
+        if job in self.preview_jobs:
+            self.preview_jobs.remove(job)
+        if job is self.preview_job:
+            self.preview_job = None
+        job.deleteLater()
+
+    def _input_failure(self, error):
+        self._composer_state("error")
+        self.analysis_bar.hide()
+        self.source_panel.hide()
+        self.media_preview.hide()
+        self.input_error.setText(tr(self.preferences.language, error))
+        self.input_error.show()
+        self.add_button.setEnabled(False)
+
+    def _render_preview(self):
+        task = self.preview_task or self.scheduler.tasks.get(self.selected_task_id)
+        if not task:
+            return
+        self._composer_state("ready")
+        self.source_panel.show()
+        self.media_preview.show()
+        self.media_preview.set_task(task)
+        self.source_title.setText(task.title)
+        self.source_title.setToolTip(f"{task.title}\n{task.url}")
+        lang = self.preferences.language
+        site = next((name for name in ("YouTube", "Facebook", "Instagram", "TikTok", "SoundCloud") if name.casefold() in task.source.casefold()), task.source)
+        if task.source.casefold() in {"twitter", "x"}:
+            site = "X (Twitter)"
+        self.source_name.setText(site)
+        names = {"YouTube": "youtube", "Facebook": "facebook", "Instagram": "instagram", "TikTok": "tiktok", "SoundCloud": "soundcloud", "X (Twitter)": "x-twitter"}
+        icon = svg_icon(names[site], palette(self.preferences.theme)["muted"], site=True) if site in names else svg_icon("link", palette(self.preferences.theme)["muted"])
+        self.source_icon.setPixmap(icon.pixmap(QSize(22, 22), self.devicePixelRatioF()))
+        self.source_details.setText(f"{tr(lang, 'author')}: {task.author}" if task.author else "")
+        self.source_details.setToolTip(task.author)
+        self.source_details.setVisible(bool(task.author))
+        self._render_source_facts(task)
+        editable = task.state in {State.READY, State.FAILED, State.CANCELLED, State.INTERRUPTED}
+        self.preview_advanced.setEnabled(editable and not task.playlist)
+        self.parameter_fields.setVisible(not task.playlist)
+        if self.format_picker.task is not task or self.format_picker.selection != task.selection:
+            self.format_picker.set_task(task)
+        self.format_picker.setVisible(not task.playlist)
+        self.format_picker.modes.setVisible(not task.playlist)
+        self.format_picker.setEnabled(editable)
+        self.format_picker.modes.setEnabled(editable)
+        self.options_editor.set_task(task)
+        self.options_editor.setEnabled(editable)
+        self._sync_disclosure()
+        self.add_button.setEnabled(self.preview_task is not None)
+
+    def _render_source_facts(self, task):
+        lang = self.preferences.language
+        self.source_duration.setText(f"{int(task.duration)//60}:{int(task.duration)%60:02}" if task.duration is not None else "—")
+        estimated = estimate_size(task)
+        if task.state == State.COMPLETED and task.final_path:
+            try:
+                estimated = Path(task.final_path).stat().st_size
+            except OSError:
+                pass
+        from .task_card import size_label
+        self.source_size.setText(("" if task.state == State.COMPLETED else "≈ ") + size_label(estimated, lang) if estimated else "—")
+
+    def _composer_selection(self, selection):
+        task = self.preview_task or self.scheduler.tasks.get(self.selected_task_id)
+        if task and task.id in self.scheduler.tasks:
+            task.output_stem = ""
+            task.naming_version = 2
+            self.scheduler._save(task)
+        self._remember_selection(selection)
+        self._render_preview()
+
+    def _remember_selection(self, selection):
+        if selection.startswith("mp3:"):
+            self.preferences.media_mode = "audio"
+            self.preferences.audio_format = "mp3"
+            self.preferences.mp3_bitrate = int(selection.split(":")[1])
+        elif selection in {"audio", "m4a"}:
+            self.preferences.media_mode = "audio"
+            self.preferences.audio_format = selection
+        else:
+            self.preferences.media_mode = "video"
+            self.preferences.video_quality = selection
+        try:
+            self.preferences.save()
+        except OSError as exc:
+            self.input_error.setText(str(exc))
+            self.input_error.show()
+
+    def _add_urls(self, *_args, download=True):
+        valid, invalid = parse_urls(self.input.text())
+        if invalid or not valid:
+            self._input_failure("invalid_links")
+            return
+        if len(valid) > 1:
+            for url in valid:
+                self.scheduler.add(url, download=True)
+            self._navigate(0)
+            return
+        if not self.preview_task or self.preview_task.url != valid[0]:
+            self.preview_timer.stop()
+            self._analyze_input()
+            return
+        if not self.options_editor.apply():
+            self.preview_advanced.setChecked(True)
+            return
+        task = Task.from_dict(self.preview_task.to_dict())
+        task.id = uuid4().hex
+        if task.playlist:
+            if not self._expand_playlist(task):
+                return
+        else:
+            if not self._submit(task):
+                return
+        self._navigate(0)
+
+    def _submit(self, task):
+        if not self._confirm_duplicate(task):
+            return False
+        task.folder = self.preferences.folder
+        self.scheduler.tasks[task.id] = task
+        self.selected_task_id = task.id
+        self.scheduler._save(task)
+        self.start_task(task.id)
+        return True
+
+    def _confirm_duplicate(self, task):
+        duplicate = None if task.repeat else self.scheduler.find_duplicate(task)
+        if not duplicate:
+            return True
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(tr(self.preferences.language, "duplicate"))
+        dialog.setText(task.title or task.url)
+        again = dialog.addButton(tr(self.preferences.language, "download_again"), QMessageBox.ButtonRole.AcceptRole)
+        opened = dialog.addButton(tr(self.preferences.language, "open"), QMessageBox.ButtonRole.ActionRole) if duplicate.final_path and Path(duplicate.final_path).is_file() else None
+        cancel = dialog.addButton(tr(self.preferences.language, "cancel"), QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel)
+        dialog.exec()
+        if opened and dialog.clickedButton() is opened:
+            self.open_result(duplicate.id, False)
+        if dialog.clickedButton() is again:
+            task.repeat = True
+            return True
+        return False
+
+    def _sync_disclosure(self):
+        lang, colors = self.preferences.language, palette(self.preferences.theme)
+        checked = self.preview_advanced.isChecked()
+        task = self.preview_task or self.scheduler.tasks.get(self.selected_task_id)
+        audio = bool(task and (task.selection in {"audio", "m4a"} or task.selection.startswith("mp3:")))
+        self.advanced_caption.setText(tr(lang, "clip_toggle" if audio else "fragment_tracks"))
+        summary = tr(lang, "configure")
+        if task and (task.clip_start is not None or task.clip_end is not None):
+            summary = f"{tr(lang, 'clip_toggle')} · {self.options_editor._time(task.clip_start or 0)}–{self.options_editor._time(task.clip_end) or '…'}"
+        self.preview_advanced.setText(summary)
+        self.preview_advanced.setIcon(svg_icon("more", colors["muted"]))
+        self.preview_advanced.chevron = svg_icon("chevronUp" if checked else "chevron", colors["muted"])
+        self.preview_advanced.update()
+
+    def _preview_options(self, *_):
+        self._sync_disclosure()
+        if self.preview_advanced.isChecked():
+            self.options_popup.show_below()
+        else:
+            self.options_popup.hide()
+
+    def _dismiss_preview_options(self):
+        self.preview_advanced.setChecked(False)
+        self.options_editor.set_task(self.preview_task or self.scheduler.tasks.get(self.selected_task_id))
+
+    def _apply_preview_options(self):
+        if self.options_editor.apply():
+            self._preview_options_changed()
+            self.options_popup.hide()
+        else:
+            self.options_popup.show_below()
+
+    def _preview_options_changed(self):
+        task = self.preview_task or self.scheduler.tasks.get(self.selected_task_id)
+        if task and task.state in {State.READY, State.FAILED, State.CANCELLED, State.INTERRUPTED} and self.options_editor.apply():
+            self.format_picker.set_task(task)
+            if task.id in self.scheduler.tasks:
+                self.scheduler._save(task)
+            self._render_preview()
+
+    def edit_options(self, task):
+        from .task_options import TaskOptionsDialog
+        dialog = TaskOptionsDialog(task, self.preferences, self)
+        if dialog.exec():
+            if task is self.preview_task:
+                self.format_picker.set_task(task)
+            if task.id in self.scheduler.tasks:
+                self.scheduler._save(task)
+
+    def _expand_playlist(self, task):
+        from .task_options import PlaylistDialog
+        dialog = PlaylistDialog(task, self.preferences.language, self)
+        if dialog.exec():
+            for entry in dialog.selected_entries():
+                child = self.scheduler.add(entry["url"], download=True)
+                child.playlist_title = task.title
+                child.playlist_index = entry["index"]
+                self.scheduler._save(child)
+            return True
+        return False
+
+    def _download_all(self):
+        for task in list(self.scheduler.tasks.values()):
             if task.state == State.READY:
                 self.start_task(task.id)
 
-    def _task_changed(self, task: Task) -> None:
-        if task.hidden:
+    def start_task(self, task_id):
+        task = self.scheduler.tasks[task_id]
+        if task.playlist:
+            if self._expand_playlist(task):
+                self.scheduler.remove(task.id)
+            return
+        if not self._confirm_duplicate(task):
+            return
+        self.scheduler.enqueue(task_id)
+
+    def select_task(self, task_id):
+        if task_id not in self.scheduler.tasks:
+            return
+        self.preview_timer.stop()
+        self._cancel_preview()
+        self.selected_task_id = task_id
+        self.input.blockSignals(True)
+        self.input.setText(self.scheduler.tasks[task_id].url)
+        self.input.blockSignals(False)
+        self.preview_task = None
+        if self.scheduler.tasks[task_id].state == State.COMPLETED:
+            self.preview_task = replace(self.scheduler.tasks[task_id], id=uuid4().hex, state=State.READY, final_path="", final_paths=[],
+                                        output_stem="", folder_configured=False, repeat=False)
+        self.input_error.hide()
+        self._render_preview()
+        for ident, card in self.cards.items():
+            card.setProperty("selected", ident == task_id)
+            card.style().unpolish(card)
+            card.style().polish(card)
+        self._navigate(0)
+
+    def _task_changed(self, task):
+        if task.hidden or self.closing:
             return
         if task.id not in self.cards:
             self.cards[task.id] = TaskCard(task, self)
-            self.cards_layout.addWidget(self.cards[task.id])
+            (self.cards_layout if task.state == State.COMPLETED else self.active_layout).addWidget(self.cards[task.id])
         else:
             self.cards[task.id].render(task)
-        if task.thumbnail.startswith("https://") and not self.cards[task.id].thumbnail_requested and task.state == State.READY:
-            self.cards[task.id].thumbnail_requested = True
-            request = QNetworkRequest(QUrl(task.thumbnail))
-            request.setTransferTimeout(10000)
-            reply = self.network.get(request)
-            reply.finished.connect(lambda ident=task.id, current=reply: self._thumbnail(ident, current))
-        if task.state == State.COMPLETED:
-            self._refresh_history()
+        card = self.cards[task.id]
+        if task.thumbnail.startswith("https://") and not card.thumbnail_requested:
+            card.thumbnail_requested = True
+            self._request_thumbnail(task.thumbnail, card.thumbnail, (64, 44))
+        if task.id == self.selected_task_id and not self.preview_task:
+            self._render_preview()
         self._queue_status()
 
-    def _thumbnail(self, task_id: str, reply: object) -> None:
-        from PySide6.QtGui import QPixmap
-        if task_id in self.cards and reply.error() == reply.NetworkError.NoError:
-            image = QPixmap()
-            if image.loadFromData(reply.readAll()) and image.width() <= 4096 and image.height() <= 4096:
-                self.cards[task_id].thumbnail.setPixmap(image.scaled(128, 72, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        reply.deleteLater()
+    def _request_thumbnail(self, url, label, size):
+        from shiboken6 import isValid
+        label.setProperty("thumbnailUrl", url)
+        def finished(pixmap):
+            if isValid(label) and label.property("thumbnailUrl") == url and not pixmap.isNull():
+                ratio = label.devicePixelRatioF()
+                scaled = pixmap.scaled(round(size[0] * ratio), round(size[1] * ratio), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                scaled.setDevicePixelRatio(ratio)
+                label.setPixmap(scaled)
+        self.images.fetch(url, finished)
 
-    def _task_removed(self, task_id: str) -> None:
+    def _task_removed(self, task_id):
         card = self.cards.pop(task_id, None)
         if card:
             self.cards_layout.removeWidget(card)
+            self.active_layout.removeWidget(card)
             card.deleteLater()
         self._queue_status()
-        self._refresh_history()
-
-    def start_task(self, task_id: str) -> None:
-        if self.installing:
-            return
-        task = self.scheduler.tasks[task_id]
-        if task.playlist and task.state == State.READY:
-            count = task.playlist_count or 0
-            response = QMessageBox.question(self, "Playlist / Плейлист",
-                f"Download entire playlist ({count} items)? / Скачать весь плейлист ({count})?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
-            if response == QMessageBox.StandardButton.Cancel:
-                return
-            if response == QMessageBox.StandardButton.No:
-                if task.playlist_first_url:
-                    self.scheduler.add(task.playlist_first_url, download=True)
-                    self.scheduler.remove(task.id)
-                else:
-                    QMessageBox.information(self, "Playlist", "A direct video URL is unavailable; paste a video link / Прямая ссылка на видео недоступна; вставьте ссылку на видео")
-                return
-            if count > 100 and QMessageBox.question(self, "Large playlist", f"Confirm {count} items / Подтвердите {count} элементов") != QMessageBox.StandardButton.Yes:
-                return
-        self.scheduler.enqueue(task_id)
-
-    def open_result(self, task_id: str, folder: bool) -> None:
-        path = Path(self.scheduler.tasks[task_id].final_path)
-        if path.is_file():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent if folder else path)))
-
-    def _refresh_history(self):
-        selected = self.history_list.currentItem()
-        selected_id = selected.data(Qt.ItemDataRole.UserRole) if selected else None
-        self.history_list.clear()
-        query = self.history_search.text().strip().casefold()
-        for task in sorted(self.scheduler.tasks.values(), key=lambda task: task.created_at, reverse=True):
-            if task.state != State.COMPLETED or query not in f"{task.title} {task.source} {task.final_path}".casefold():
-                continue
-            try:
-                date = datetime.fromisoformat(task.created_at).astimezone().strftime("%d.%m.%Y %H:%M")
-            except ValueError:
-                date = task.created_at
-            item = QListWidgetItem(f"{task.title}\n{date}  ·  {task.source}  ·  {format_label(self.preferences.language, task.selection)}")
-            item.setToolTip(task.final_path)
-            item.setData(Qt.ItemDataRole.UserRole, task.id)
-            self.history_list.addItem(item)
-            if task.id == selected_id:
-                self.history_list.setCurrentItem(item)
-        self.history_empty.setVisible(self.history_list.count() == 0)
-
-    def _history_open(self, folder):
-        item = self.history_list.currentItem()
-        if item:
-            self.open_result(item.data(Qt.ItemDataRole.UserRole), folder)
-
-    def _open_history_item(self, item: QListWidgetItem) -> None:
-        self.open_result(item.data(Qt.ItemDataRole.UserRole), False)
-
-    def _choose_folder(self) -> None:
-        value = QFileDialog.getExistingDirectory(self, tr(self.preferences.language, "path"), self.path_edit.text())
-        if value:
-            self.path_edit.setText(value)
-
-    def _save_settings(self):
-        from al_media.config import validate_folder
-        try:
-            candidate = replace(self.preferences,
-                folder=str(validate_folder(self.path_edit.text())),
-                theme=self.theme.currentData(), language=self.language.currentData())
-            candidate.save()
-            for key, value in asdict(candidate).items():
-                setattr(self.preferences, key, value)
-            self.setStyleSheet(stylesheet(self.preferences.theme))
-            self._translate()
-            self.save_status.setText(tr(self.preferences.language, "saved"))
-            self.scheduler.pump()
-            return True
-        except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, tr(self.preferences.language, "settings"), str(exc))
-            return False
-
-    def _import_links(self):
-        path, _ = QFileDialog.getOpenFileName(self, tr(self.preferences.language, "import_links"), "", "Text (*.txt)")
-        if path:
-            try:
-                self.input.setPlainText(Path(path).read_text(encoding="utf-8-sig"))
-                self._add_urls()
-            except (OSError, UnicodeError):
-                QMessageBox.warning(self, "TXT", tr(self.preferences.language, "file_read_error"))
+        if self.selected_task_id == task_id:
+            self.selected_task_id = ""
+            self._input_changed()
 
     def _queue_status(self):
         tasks = [task for task in self.scheduler.tasks.values() if not task.hidden]
-        active = sum(task.state in BUSY for task in tasks)
         ready = sum(task.state == State.READY for task in tasks)
-        completed = sum(task.state == State.COMPLETED for task in tasks)
-        self.empty_panel.setVisible(not tasks)
-        self.all_button.setVisible(ready > 0)
-        self.all_button.setEnabled(ready > 0)
-        self.stop_button.setVisible(active > 0)
-        self.stop_button.setEnabled(active > 0)
-        self.clear_button.setVisible(completed > 0)
-        self.clear_button.setEnabled(completed > 0)
-        self.queue_summary.setText(tr(self.preferences.language, "queue_summary").format(total=len(tasks), active=active, ready=ready))
+        busy = sum(task.state in BUSY for task in tasks)
+        finished = [task for task in tasks if task.state == State.COMPLETED]
+        active = [task for task in tasks if task.state != State.COMPLETED]
+        self.active_panel.setVisible(bool(active))
+        self.completed_panel.setVisible(bool(finished))
+        self.all_button.setVisible(ready > 1)
+        self.stop_button.setVisible(busy > 1)
+        for button, key in ((self.all_button, "all"), (self.stop_button, "stop_all")):
+            button.setText("")
+            button.setToolTip(tr(self.preferences.language, key))
+            button.setAccessibleName(tr(self.preferences.language, key))
+        self.clear_button.setVisible(bool(finished))
+        running = sum(task.state in {State.FETCHING_METADATA, State.DOWNLOADING, State.POSTPROCESSING} for task in active)
+        waiting = sum(task.state in {State.PENDING_METADATA, State.QUEUED} for task in active)
+        lang = self.preferences.language
+        self.queue_summary.setText(" · ".join(part for part in (
+            f"{tr(lang, 'active_count')}: {running}" if running else "", f"{tr(lang, 'waiting_count')}: {waiting}" if waiting else "") if part))
+        active.sort(key=lambda task: task.created_at)
+        active.sort(key=lambda task: task.state in {State.PENDING_METADATA, State.QUEUED, State.CANCELLED, State.FAILED, State.INTERRUPTED})
+        finished.sort(key=lambda task: task.created_at, reverse=True)
+        for target, ordered in ((self.active_layout, active), (self.cards_layout, finished)):
+            for index, task in enumerate(ordered):
+                card = self.cards.get(task.id)
+                if card:
+                    other = self.cards_layout if target is self.active_layout else self.active_layout
+                    other.removeWidget(card)
+                    if target.indexOf(card) != index:
+                        target.insertWidget(index, card)
 
     def _stop_all(self):
         self.scheduler.cancel_all()
 
     def _clear_completed(self):
         for task in list(self.scheduler.tasks.values()):
-            if task.state == State.COMPLETED and not task.hidden:
+            if not task.hidden and task.state == State.COMPLETED and task.id not in self.scheduler.jobs:
                 self.scheduler.remove(task.id)
 
-    def _open_downloads(self):
-        QDesktopServices.openUrl(QUrl.fromLocalFile(self.preferences.folder))
+    def open_result(self, task_id, folder):
+        path = Path(self.scheduler.tasks[task_id].final_path)
+        if path.is_file():
+            if folder:
+                open_local(path)
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
-    def _open_logs(self) -> None:
-        folder = data_root() / "logs"
-        folder.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+    def _choose_folder(self):
+        from PySide6.QtWidgets import QFileDialog
+        folder = QFileDialog.getExistingDirectory(self, tr(self.preferences.language, "path"), self.path_edit.text())
+        if folder:
+            self.path_edit.setText(folder)
+            self._save_settings()
 
-    def dragEnterEvent(self, event: object) -> None:
+    def _save_settings(self, *_):
+        if self.settings_loading:
+            return True
+        from al_media.config import validate_folder
+        try:
+            candidate = replace(self.preferences, folder=str(validate_folder(self.path_edit.text())), theme=self.theme.currentData(),
+                                language=self.language.currentData(), concurrency=self.concurrency.value(), name_style=self.name_style.currentData(),
+                                subfolders=self.subfolders.currentData(), music_tags=self.music_tags.isChecked(), music_cover=self.music_cover.isChecked())
+            candidate.close_to_tray = self.close_to_tray.isChecked()
+            candidate.save()
+            for key, value in asdict(candidate).items():
+                setattr(self.preferences, key, value)
+            self._translate()
+            self._apply_appearance()
+            self.scheduler.pump()
+            return True
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, tr(self.preferences.language, "settings"), str(exc))
+            return False
+
+    def _show_licenses(self):
+        path = app_root() / "THIRD_PARTY_NOTICES.md"
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _setup_tray(self):
+        self.tray = QSystemTrayIcon(self.windowIcon(), self)
+        self.tray.setToolTip(APP_NAME)
+        menu = QMenu(self)
+        self.show_action = QAction(self)
+        self.quit_action = QAction(self)
+        self.show_action.triggered.connect(self._show_window)
+        self.quit_action.triggered.connect(self._exit_application)
+        menu.addAction(self.show_action)
+        menu.addSeparator()
+        menu.addAction(self.quit_action)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(lambda reason: self._show_window() if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick} else None)
+        available = QSystemTrayIcon.isSystemTrayAvailable()
+        if available:
+            self.tray.show()
+
+    def _show_window(self):
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _minimize_to_tray(self):
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray.show()
+            self.hide()
+
+    def _exit_application(self):
+        self.explicit_exit = True
+        if not self.close():
+            self.explicit_exit = False
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "media_preview"):
+            self.media_preview.sync_animation()
+
+    def _queue_finished(self, completed, failed):
+        if self.tray.isVisible() and not self.isActiveWindow():
+            self.tray.showMessage(tr(self.preferences.language, "queue_finished"),
+                                  tr(self.preferences.language, "queue_result").format(completed=completed, failed=failed))
+
+    def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() or event.mimeData().hasText():
             event.acceptProposedAction()
 
-    def dropEvent(self, event: object) -> None:
+    def dropEvent(self, event):
         values = []
         for url in event.mimeData().urls():
             if url.isLocalFile() and url.toLocalFile().lower().endswith(".txt"):
                 try:
-                    values.append(Path(url.toLocalFile()).read_text(encoding="utf-8"))
+                    values.append(Path(url.toLocalFile()).read_text(encoding="utf-8-sig"))
                 except (OSError, UnicodeError):
-                    QMessageBox.warning(self, "TXT", tr(self.preferences.language, "file_read_error"))
+                    self._input_failure("file_read_error")
             elif url.scheme() in {"http", "https"}:
                 values.append(url.toString())
         if not values and event.mimeData().hasText():
             values.append(event.mimeData().text())
         if values:
-            self.input.setPlainText("\n".join(values))
-            self._add_urls()
+            self.input.setText("\n".join(values))
+            self._navigate(0)
         event.acceptProposedAction()
 
-    def closeEvent(self, event: object) -> None:
-        if self.scheduler.jobs:
-            answer = QMessageBox.question(self, tr(self.preferences.language, "exit"), tr(self.preferences.language, "exit_jobs"))
-            if answer != QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
-            self.scheduler.shutdown()
-            for job in list(self.scheduler.jobs.values()):
-                job.process.waitForFinished(3000)
+    def closeEvent(self, event):
+        if self.preferences.close_to_tray and not self.explicit_exit and QSystemTrayIcon.isSystemTrayAvailable():
+            self._minimize_to_tray()
+            event.ignore()
+            return
+        if self.scheduler.jobs and QMessageBox.question(self, tr(self.preferences.language, "exit"), tr(self.preferences.language, "exit_jobs")) != QMessageBox.StandardButton.Yes:
+            event.ignore()
+            return
+        self.closing = True
+        self.source_probe.shutdown()
+        if self.media_preview.extractor:
+            self.media_preview.extractor.shutdown()
+        self.preview_timer.stop()
+        self._cancel_preview()
+        self.scheduler.shutdown()
+        for job in [*self.scheduler.jobs.values(), *self.preview_jobs]:
+            job.cancel()
+            job.process.waitForFinished(3000)
+        self.tray.hide()
         event.accept()

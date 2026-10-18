@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from al_media.config import Preferences, validate_folder
 from al_media.database import Database
 from al_media.models import State, Task
 
 from .engine import EngineJob
-from .metadata import available_selections
+from .metadata import available_selections, populate_task, preferred_selection
+from .naming import canonical_url, configure_destination, same_result
 
 
 class Scheduler(QObject):
     changed = Signal(object)
     removed = Signal(str)
+    queue_finished = Signal(int, int)
 
     def __init__(self, database: Database, tools: dict[str, Path], preferences: Preferences,
                  parent: QObject | None = None):
@@ -26,23 +27,23 @@ class Scheduler(QObject):
         self.tasks = {task.id: task for task in database.all()}
         self.jobs: dict[str, EngineJob] = {}
         self.stopping = False
+        self.batch_ids: set[str] = set()
 
     def _save(self, task: Task) -> None:
         self.database.save(task)
         self.changed.emit(task)
 
     def add(self, url: str, *, download: bool = False) -> Task:
-        task = Task(url=url, folder=self.preferences.folder)
-        parsed = urlsplit(url)
-        playlist_link = parsed.path.rstrip("/") == "/playlist" and bool(parse_qs(parsed.query).get("list"))
-        if download and not playlist_link:
-            task.state = State.READY
+        selection = self.preferences.video_quality if self.preferences.media_mode == "video" else (
+            f"mp3:{self.preferences.mp3_bitrate}" if self.preferences.audio_format == "mp3" else self.preferences.audio_format)
+        task = Task(url=url, folder=self.preferences.folder, selection=selection, auto_start=download)
+        for existing in self.tasks.values():
+            active_states = {State.PENDING_METADATA, State.FETCHING_METADATA, State.READY, State.QUEUED, State.DOWNLOADING, State.POSTPROCESSING}
+            if not existing.hidden and canonical_url(existing.url) == canonical_url(url) and existing.selection == selection and existing.state in active_states:
+                return existing
         self.tasks[task.id] = task
         self._save(task)
-        if task.state == State.READY:
-            self.enqueue(task.id)
-        else:
-            self.fetch(task.id)
+        self.fetch(task.id)
         return task
 
     def fetch(self, task_id: str) -> None:
@@ -59,12 +60,21 @@ class Scheduler(QObject):
         self.pump()
 
     def _start_job(self, task: Task, mode: str) -> None:
-        job = EngineJob(task, self.tools, self.preferences, mode, self)
+        try:
+            job = EngineJob(task, self.tools, self.preferences, mode, self)
+        except (KeyError, ValueError) as exc:
+            task.state = State.FAILED
+            task.error = "error_engine_missing" if isinstance(exc, KeyError) else "error_invalid_metadata"
+            self._save(task)
+            QTimer.singleShot(0, self.pump)
+            return
         self.jobs[task.id] = job
         job.metadata_ready.connect(self._metadata)
         job.details_ready.connect(self._details)
         job.notice.connect(self._notice)
         job.progress.connect(self._progress)
+        job.stage_changed.connect(self._stage)
+        job.output_info.connect(self._output_info)
         job.completed.connect(self._completed)
         job.failed.connect(self._failed)
         job.finished.connect(self._job_finished)
@@ -85,40 +95,32 @@ class Scheduler(QObject):
         task.error = message
         self._save(task)
 
+    def _output_info(self, task_id: str, info: dict):
+        task = self.tasks[task_id]
+        task.output_bitrate = info.get("bitrate")
+        self._save(task)
+
     def _metadata(self, task_id: str, info: dict) -> None:
         task = self.tasks[task_id]
-        task.title = str(info.get("title") or info.get("id") or "Untitled")
-        task.source = str(info.get("extractor_key") or info.get("extractor") or "")
-        task.author = str(info.get("uploader") or info.get("channel") or "")
-        task.thumbnail = str(info.get("thumbnail") or "")
-        duration = info.get("duration")
-        task.duration = float(duration) if isinstance(duration, (int, float)) else None
-        raw_formats = info.get("formats")
-        task.formats = [item for item in raw_formats if isinstance(item, dict)] if isinstance(raw_formats, list) else []
-        raw_entries = info.get("entries")
-        entries = raw_entries if isinstance(raw_entries, list) else []
-        task.playlist_count = len(entries) if entries else None
-        task.playlist = info.get("_type") == "playlist" and bool(entries)
-        if entries and isinstance(entries[0], dict):
-            first = entries[0].get("webpage_url") or entries[0].get("url") or ""
-            task.playlist_first_url = first if isinstance(first, str) and first.startswith(("http://", "https://")) else ""
-        choices = available_selections(info)
+        populate_task(task, info)
+        choices = available_selections({"formats": task.formats})
         if not task.playlist and not choices:
             task.error = "error_no_formats"
             task.transition(State.FAILED)
         else:
             if not task.playlist and task.selection not in {key for key, _ in choices}:
-                lower = [key for key, _ in choices if key.startswith("video:") and task.selection.startswith("video:")
-                         and int(key.split(":")[1]) <= int(task.selection.split(":")[1])]
-                task.selection = lower[0] if lower else choices[0][0]
+                task.selection = preferred_selection(task, self.preferences, task.selection)
             task.transition(State.READY)
         self._save(task)
+        if task.state == State.READY and task.auto_start and not task.playlist:
+            self.enqueue(task.id)
 
     def enqueue(self, task_id: str) -> None:
         task = self.tasks[task_id]
         if task.state not in {State.READY, State.FAILED, State.CANCELLED, State.INTERRUPTED}:
             return
         try:
+            configure_destination(task, self.preferences)
             task.folder = str(validate_folder(task.folder or self.preferences.folder))
         except OSError:
             task.error = "error_folder_unavailable"
@@ -127,8 +129,11 @@ class Scheduler(QObject):
             self._save(task)
             return
         task.error = ""
+        task.processing_stage = ""
+        task.output_bitrate = None
         task.percent = task.downloaded = task.total = task.speed = task.eta = None
         task.transition(State.QUEUED)
+        self.batch_ids.add(task.id)
         self._save(task)
         self.pump()
 
@@ -160,11 +165,19 @@ class Scheduler(QObject):
         task.error = ""
         if progress.stage == "postprocess" and task.state == State.DOWNLOADING:
             task.transition(State.POSTPROCESSING)
-        task.percent = progress.percent
+        task.percent = None if progress.stage == "postprocess" else progress.percent
         task.downloaded = progress.downloaded
         task.total = progress.total
         task.speed = progress.speed
         task.eta = progress.eta
+        self._save(task)
+
+    def _stage(self, task_id: str, stage: str) -> None:
+        task = self.tasks[task_id]
+        task.processing_stage = stage
+        if task.state == State.DOWNLOADING:
+            task.transition(State.POSTPROCESSING)
+        task.percent = task.speed = task.eta = None
         self._save(task)
 
     def _completed(self, task_id: str, files: list[str]) -> None:
@@ -183,7 +196,10 @@ class Scheduler(QObject):
     def _failed(self, task_id: str, error_code: str) -> None:
         task = self.tasks[task_id]
         task.error = error_code
-        task.transition(State.CANCELLED if error_code == "cancelled" else State.FAILED)
+        if self.stopping and error_code == "cancelled":
+            task.state = State.INTERRUPTED
+        else:
+            task.transition(State.CANCELLED if error_code == "cancelled" else State.FAILED)
         self._save(task)
 
     def _job_finished(self, task_id: str) -> None:
@@ -191,6 +207,17 @@ class Scheduler(QObject):
         if job:
             job.deleteLater()
         self.pump()
+        if self.batch_ids and not self.jobs and not any(task.state == State.QUEUED for task in self.tasks.values()):
+            completed = sum(self.tasks[ident].state == State.COMPLETED for ident in self.batch_ids if ident in self.tasks)
+            failed = sum(self.tasks[ident].state == State.FAILED for ident in self.batch_ids if ident in self.tasks)
+            self.batch_ids.clear()
+            if not self.stopping:
+                self.queue_finished.emit(completed, failed)
+
+    def find_duplicate(self, task: Task) -> Task | None:
+        return next((existing for existing in self.tasks.values() if existing.id != task.id and same_result(existing, task)
+                     and (existing.state in {State.READY, State.QUEUED, State.DOWNLOADING, State.POSTPROCESSING}
+                          or existing.state == State.COMPLETED and bool(existing.final_path) and Path(existing.final_path).is_file())), None)
 
     def cancel(self, task_id: str) -> None:
         task = self.tasks[task_id]
@@ -217,7 +244,7 @@ class Scheduler(QObject):
         self.stopping = True
         for task in self.tasks.values():
             if task.state in {State.PENDING_METADATA, State.QUEUED}:
-                task.transition(State.CANCELLED)
+                task.state = State.INTERRUPTED
                 self._save(task)
         for job in list(self.jobs.values()):
             job.cancel()

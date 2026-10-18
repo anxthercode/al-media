@@ -155,7 +155,7 @@ def test_metadata_requests_respect_concurrency(qtbot, tmp_path, monkeypatch):
     scheduler._failed(tasks[0].id, "cancelled")
     scheduler._job_finished(tasks[0].id)
     assert len(started) == 1
-    assert all(task.state == State.CANCELLED for task in tasks)
+    assert all(task.state == State.INTERRUPTED for task in tasks)
     db.close()
 
 
@@ -185,15 +185,16 @@ def test_default_quality_uses_available_lower_resolution(qtbot, tmp_path):
     db.close()
 
 
-def test_direct_download_skips_metadata_job(qtbot, tmp_path, monkeypatch):
+def test_download_request_analyzes_source_before_starting(qtbot, tmp_path, monkeypatch):
     db = Database(tmp_path / "direct.sqlite3")
     scheduler = Scheduler(db, TOOLS, Preferences(folder=str(tmp_path)))
     modes = []
     monkeypatch.setattr(scheduler, "_start_job", lambda task, mode: modes.append(mode))
     task = scheduler.add("https://example.test/video", download=True)
-    assert modes == ["download"]
-    assert task.state == State.DOWNLOADING
-    scheduler._details(task.id, {"title": "Example", "duration": 12})
+    assert modes == ["metadata"]
+    assert task.state == State.FETCHING_METADATA
+    scheduler._metadata(task.id, {"title": "Example", "duration": 12, "formats": [{"height": 2160, "vcodec": "h264", "acodec": "aac"}]})
     assert task.title == "Example"
     assert task.state == State.DOWNLOADING
+    assert modes == ["metadata", "download"]
     db.close()

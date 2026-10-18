@@ -24,8 +24,10 @@ tools = project / "tools"
 datas = [(str(tools / name), "tools") for name in ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe")]
 datas += [(str(project / "THIRD_PARTY_NOTICES.md"), ".")]
 datas += [(str(project / "LICENSE"), "."), (str(tools / "dependencies.json"), "tools")]
-asset_names = ("app.ico", "app.png", "check.svg", "chevron-down.svg", "chevron-up.svg")
+asset_names = ("app.ico", "app.png", "check.svg", "chevron-down.svg", "chevron-up.svg", "chevron-down-light.svg", "chevron-up-light.svg")
 datas += [(str(project / "assets" / name), "assets") for name in asset_names]
+for folder in ("icons", "sites"):
+    datas += [(str(path), "assets/" + folder) for path in (project / "assets" / folder).glob("*.svg")]
 if (tools / "licenses").exists():
     datas += [(str(path), "tools/licenses") for path in (tools / "licenses").iterdir() if path.is_file()]
 a = Analysis([str(project / "main.py")], pathex=[str(project / "src")], binaries=[], datas=datas,
@@ -39,5 +41,6 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="ALMedia", debug=False
           bootloader_ignore_signals=False, strip=False, upx=False, console=False,
           contents_directory="_runtime_v2",
           version=str(version_resource),
+          manifest=str(project / "packaging/ALMedia.manifest"),
           icon=str(project / "assets" / "app.ico") if (project / "assets" / "app.ico").exists() else None)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="ALMedia")

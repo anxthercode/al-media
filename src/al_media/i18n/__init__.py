@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .desktop import BE_ERRORS, LANGUAGES, ROWS
 from .interface import UI_TEXT
 
 TEXT = {
@@ -119,26 +120,23 @@ TEXT = {
 for language, labels in UI_TEXT.items():
     TEXT[language].update(labels)
 
+TEXT["be"] = dict(BE_ERRORS)
+for key, values in ROWS.items():
+    for (_name, language), value in zip(LANGUAGES, values, strict=True):
+        TEXT[language][key] = value
+
 
 def tr(language: str, key: str) -> str:
-    return TEXT.get(language, TEXT["ru"]).get(key, key)
+    return TEXT.get(language, TEXT["ru"]).get(key, TEXT["en"].get(key, key))
 
 
 def format_label(language: str, key: str, max_height: int | None = None) -> str:
-    labels = {
-        "ru": {"best": "Лучшее качество", "mp4": "Видео в MP4", "audio": "Оригинал — без конвертации", "m4a": "M4A — без конвертации"},
-        "en": {"best": "Best quality", "mp4": "MP4 video", "audio": "Original — no conversion", "m4a": "M4A — no conversion"},
-        "uk": {"best": "Найкраща якість", "mp4": "Відео в MP4", "audio": "Оригінал — без конвертації", "m4a": "M4A — без конвертації"},
-    }
     if key == "best" and max_height:
         return f"{max_height}p — {tr(language, 'best_quality')}"
     if key.startswith("video:"):
         height = int(key.split(":")[1])
-        if max_height:
-            return f"{height}p — {tr(language, 'best_quality' if height == max_height else 'smaller_file')}"
-        names = {2160: "4K", 1440: "2K", 1080: "Full HD", 720: "HD"}
-        return f"{height}p" + (f" · {names[height]}" if height in names else "")
+        return f"{height}p" + (f" — {tr(language, 'best_quality')}" if height == max_height else "")
     if key.startswith("mp3:"):
         rate = key.split(":")[1]
-        return f"{rate} {tr(language, 'kbps')} — {tr(language, 'bitrate_' + rate)}"
-    return labels.get(language, labels["ru"]).get(key, key)
+        return f"MP3 · {rate} {tr(language, 'kbps')}"
+    return {"best": tr(language, "best_available"), "audio": tr(language, "source_audio"), "m4a": "M4A", "mp4": "MP4"}.get(key, key)
