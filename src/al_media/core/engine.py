@@ -6,7 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, Qt, QTimer, Signal
 
 from al_media.config import Preferences
 from al_media.models import Task
@@ -15,6 +15,7 @@ from .commands import download_args, metadata_args
 from .errors import classify_engine_error
 from .naming import publish_files
 from .postprocess import cleanup_subtitle_backups, mp3_encoding_plan, postprocess_plans
+from .process_runner import ProcessRunner
 from .progress import LineBuffer, parse_progress
 
 
@@ -48,6 +49,7 @@ class EngineJob(QObject):
         self._done = False
         self.attempt = 0
         self.post_active = False
+        self.post_runner = None
         self.post_plans = []
         self.current_plan = None
         self.final_paths = []
@@ -83,6 +85,9 @@ class EngineJob(QObject):
         self.cancelled = True
         self.timer.stop()
         self.retry_timer.stop()
+        if self.post_runner:
+            self.post_runner.cancel()
+            return
         pid = self.process.processId()
         if self.process.state() != QProcess.ProcessState.NotRunning:
             if os.name == "nt" and pid:
@@ -160,7 +165,7 @@ class EngineJob(QObject):
         elif channel == "err":
             if "time=" in line or "frame=" in line:
                 self.timer.start(300000)
-            self.errors.append(line)
+            self.errors = [*self.errors[-79:], line]
 
     def _finish(self, code: int, _status: QProcess.ExitStatus) -> None:
         if self._done:
@@ -254,10 +259,22 @@ class EngineJob(QObject):
         self.buffers = {"out": LineBuffer(), "err": LineBuffer()}
         self.stage_changed.emit(self.task.id, self.current_plan.stage)
         executable = self.tools.get(self.current_plan.program, self.tools["ffmpeg"].with_name(self.current_plan.program + ".exe"))
-        self.process.setProgram(str(executable))
-        self.process.setArguments(self.current_plan.arguments)
-        self.process.start()
+        self.post_runner = ProcessRunner([str(executable), *self.current_plan.arguments],
+                                         "out" if self.current_plan.program == "ffprobe" else "err", self)
+        self.post_runner.output.connect(self._post_data, Qt.ConnectionType.QueuedConnection)
+        self.post_runner.finished.connect(self._post_finished, Qt.ConnectionType.QueuedConnection)
+        self.post_runner.start()
         self.timer.start(300000)
+
+    def _post_data(self, channel, data):
+        for line in self.buffers[channel].feed(data.decode("utf-8", "replace")):
+            self._line(channel, line)
+
+    def _post_finished(self, code):
+        runner, self.post_runner = self.post_runner, None
+        if runner:
+            runner.deleteLater()
+        self._finish_postprocess(code)
 
     def _finish_postprocess(self, code):
         self.timer.stop()
@@ -275,6 +292,11 @@ class EngineJob(QObject):
         if plan.program == "ffprobe" and not self.cancelled and not code:
             try:
                 streams = json.loads("\n".join(self.post_stdout)).get("streams", [])
+                if not self.task.selection.startswith("mp3:"):
+                    if not streams or streams[0].get("codec_type") != "video" or not (streams[0].get("width", 0) > 0 and streams[0].get("height", 0) > 0):
+                        raise ValueError("Clipped output has no video stream")
+                    QTimer.singleShot(0, self._start_postprocess)
+                    return
                 rate = int(streams[0].get("bit_rate", 0)) if streams else 0
                 requested = int(self.task.selection.split(":")[1])
                 if rate > requested * 1000 + 1000:

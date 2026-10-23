@@ -53,6 +53,7 @@ class Task:
     folder: str = ""
     final_path: str = ""
     final_paths: list[str] = field(default_factory=list)
+    final_size: int | None = None
     hidden: bool = False
     error: str = ""
     percent: float | None = None
@@ -84,6 +85,7 @@ class Task:
     output_bitrate: int | None = None
     audio_tracks: list[dict] = field(default_factory=list)
     audio_track_ids: list[str] = field(default_factory=list)
+    preferences_snapshot: dict = field(default_factory=dict)
 
     def transition(self, target: State) -> None:
         if target not in TRANSITIONS[self.state]:

@@ -14,6 +14,9 @@ foreach ($name in @('yt-dlp.exe', 'ffmpeg.exe', 'ffprobe.exe', 'deno.exe')) {
 }
 if (-not (Test-Path (Join-Path $root "dist\ALMedia-$version-portable-win-x64.zip"))) { throw 'Portable ZIP missing' }
 if (-not (Test-Path (Join-Path $tree '_runtime_v2\PySide6\QtCore.pyd'))) { throw 'Versioned runtime missing QtCore' }
+foreach ($relative in @('_runtime_v2\PySide6\QtQuick.pyd', '_runtime_v2\PySide6\QtQml.pyd', '_runtime_v2\al_media\quick\qml\Main.qml', '_runtime_v2\al_media\quick\qml\Theme.qml', '_runtime_v2\PySide6\qml\QtQuick\Controls\Basic\qmldir')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $tree $relative))) { throw "Qt Quick resource missing: $relative" }
+}
 if (Test-Path (Join-Path $tree '_runtime_v2\icuuc.dll')) { throw 'Incompatible ICU DLL included in runtime' }
 $oldQtPlatform = $env:QT_QPA_PLATFORM
 $oldPath = $env:PATH

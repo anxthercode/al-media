@@ -21,4 +21,4 @@ $sums = foreach ($name in $releaseFiles) {
     if (-not (Test-Path -LiteralPath $artifact)) { throw "Release artifact missing: $name" }
     "{0}  {1}" -f (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant(), $name
 }
-$sums | Set-Content -LiteralPath (Join-Path $root 'dist\SHA256SUMS.txt') -Encoding ascii
+$sums | Set-Content -LiteralPath (Join-Path $root "dist\ALMedia-$version-SHA256SUMS.txt") -Encoding ascii

@@ -33,7 +33,7 @@ try {
     foreach ($name in @('yt-dlp.exe', 'ffmpeg.exe', 'ffprobe.exe', 'deno.exe')) {
         if (-not (Test-Path (Join-Path $tree "tools\$name"))) { throw "Package missing $name" }
     }
-    Copy-Item -LiteralPath (Join-Path $root 'docs\USER_GUIDE.md') -Destination (Join-Path $tree 'README.md') -Force
+    Copy-Item -LiteralPath (Join-Path $root 'packaging\README.txt') -Destination (Join-Path $tree 'README.txt') -Force
     foreach ($notice in @('LICENSE', 'THIRD_PARTY_NOTICES.md')) {
         Copy-Item -LiteralPath (Join-Path $root $notice) -Destination (Join-Path $tree $notice) -Force
     }

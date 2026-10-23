@@ -1,7 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 import ast
+import json
+import subprocess
 from pathlib import Path
 
+import PySide6
 from PyInstaller.utils.win32.versioninfo import FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo, VarStruct, VSVersionInfo
 
 project = Path(SPECPATH).parent
@@ -24,14 +27,38 @@ tools = project / "tools"
 datas = [(str(tools / name), "tools") for name in ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe")]
 datas += [(str(project / "THIRD_PARTY_NOTICES.md"), ".")]
 datas += [(str(project / "LICENSE"), "."), (str(tools / "dependencies.json"), "tools")]
-asset_names = ("app.ico", "app.png", "check.svg", "chevron-down.svg", "chevron-up.svg", "chevron-down-light.svg", "chevron-up-light.svg")
+asset_names = ("app.ico", "app.png")
 datas += [(str(project / "assets" / name), "assets") for name in asset_names]
 for folder in ("icons", "sites"):
     datas += [(str(path), "assets/" + folder) for path in (project / "assets" / folder).glob("*.svg")]
+# File-backed QML imports use the same package-relative paths in source and EXE.
+quick_root = project / "src/al_media/quick/qml"
+datas += [(str(path), "al_media/quick/qml/" + str(path.parent.relative_to(quick_root)).replace("\\", "/"))
+          for path in quick_root.rglob("*") if path.is_file() and (path.suffix in {".qml", ".svg", ".qmltypes"} or path.name == "qmldir")]
 if (tools / "licenses").exists():
     datas += [(str(path), "tools/licenses") for path in (tools / "licenses").iterdir() if path.is_file()]
 a = Analysis([str(project / "main.py")], pathex=[str(project / "src")], binaries=[], datas=datas,
              hiddenimports=[], hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=[], noarchive=False)
+# Keep precisely the QML module closure discovered from the actual application.
+# The standard QtQml hook otherwise bundles every installed QML style/module.
+qt_package = Path(PySide6.__file__).parent
+qml_modules = json.loads(subprocess.run(
+    [str(qt_package / "qmlimportscanner.exe"), "-rootPath", str(quick_root), "-importPath", str(qt_package / "qml")],
+    check=True, capture_output=True, text=True, encoding="utf-8").stdout)
+required_qml = {item["relativePath"].replace("\\", "/") for item in qml_modules if item.get("type") == "module" and item.get("relativePath")}
+known_qml = sorted((path.parent.relative_to(qt_package / "qml").as_posix() for path in (qt_package / "qml").rglob("qmldir")), key=len, reverse=True)
+
+def needed_qml(entry):
+    name = entry[0].replace("\\", "/")
+    prefix = "PySide6/qml/"
+    if not name.startswith(prefix):
+        return True
+    relative = name[len(prefix):]
+    module = next((module for module in known_qml if relative.startswith(module + "/")), None)
+    return module is None or module in required_qml
+
+a.datas = [entry for entry in a.datas if needed_qml(entry)]
+a.binaries = [entry for entry in a.binaries if needed_qml(entry)]
 # Qt6Core imports the Windows ICU API from the OS. A build host may have an
 # unrelated icuuc.dll on PATH (for example, from Poppler); PyInstaller can pick
 # it up even though its exports are incompatible with Windows Qt.

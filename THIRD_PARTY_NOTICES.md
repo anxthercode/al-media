@@ -9,4 +9,4 @@ This application's own code is under MIT (see `LICENSE`). This does not relicens
 - **Lucide** interface icons: [Lucide](https://lucide.dev/license), ISC license. SVG resources retain the source attribution.
 - **Font Awesome Free 6.7.2** brand icons: [Font Awesome](https://fontawesome.com/license/free), CC BY 4.0 for icons. SVG resources retain their copyright and license attribution. Brand names and marks belong to their owners.
 
-The pinned archive hashes and URLs are in `tools/dependencies.json`. The developer build script verifies downloaded tool files against the pinned SHA-256 values. The application has no updater. Public redistribution requires completing the component-specific license and source availability review described in docs/RELEASE.md.
+The pinned archive hashes and URLs are in `tools/dependencies.json`. The developer build script verifies downloaded tool files against the pinned SHA-256 values. The application has no updater. Public redistribution requires completing a component-specific license and source availability review.

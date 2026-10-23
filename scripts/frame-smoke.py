@@ -17,9 +17,9 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from al_media.config import app_root
+from al_media.core.preview_frames import FrameExtractor
 from al_media.core.tools import bundled_tools
 from al_media.models import Task
-from al_media.ui.preview_frames import FrameExtractor
 
 
 class RangeHandler(BaseHTTPRequestHandler):
@@ -61,7 +61,9 @@ class RangeHandler(BaseHTTPRequestHandler):
 def main():
     app = QApplication([])
     ffmpeg = bundled_tools()["ffmpeg"]
-    with tempfile.TemporaryDirectory(prefix="frame-smoke-", dir=app_root() / ".tmp") as folder:
+    temporary_root = app_root() / ".tmp"
+    temporary_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="frame-smoke-", dir=temporary_root) as folder:
         media = Path(folder) / "video.mp4"
         subprocess.run([str(ffmpeg), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
                         "testsrc2=size=1280x720:rate=12:duration=8", "-an", "-c:v", "mpeg4", "-q:v", "3",

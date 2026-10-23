@@ -15,7 +15,3 @@ tools/*.exe
 .env.*
 *.part
 *.ytdl
-
-# Local design explorations; the selected logo is assets/app.png + assets/app.ico.
-/assets/icon-concepts/
-/assets/app-icon-*

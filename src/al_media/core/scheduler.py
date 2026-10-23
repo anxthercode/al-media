@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import asdict, replace
 from pathlib import Path
+from time import monotonic
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -28,8 +30,15 @@ class Scheduler(QObject):
         self.jobs: dict[str, EngineJob] = {}
         self.stopping = False
         self.batch_ids: set[str] = set()
+        self.pending_progress: set[str] = set()
+        self.progress_saved: dict[str, float] = {}
+        self.progress_timer = QTimer(self)
+        self.progress_timer.setSingleShot(True)
+        self.progress_timer.setInterval(150)
+        self.progress_timer.timeout.connect(self._flush_progress)
 
     def _save(self, task: Task) -> None:
+        self.pending_progress.discard(task.id)
         self.database.save(task)
         self.changed.emit(task)
 
@@ -37,6 +46,7 @@ class Scheduler(QObject):
         selection = self.preferences.video_quality if self.preferences.media_mode == "video" else (
             f"mp3:{self.preferences.mp3_bitrate}" if self.preferences.audio_format == "mp3" else self.preferences.audio_format)
         task = Task(url=url, folder=self.preferences.folder, selection=selection, auto_start=download)
+        task.preferences_snapshot = asdict(self.preferences)
         for existing in self.tasks.values():
             active_states = {State.PENDING_METADATA, State.FETCHING_METADATA, State.READY, State.QUEUED, State.DOWNLOADING, State.POSTPROCESSING}
             if not existing.hidden and canonical_url(existing.url) == canonical_url(url) and existing.selection == selection and existing.state in active_states:
@@ -45,6 +55,47 @@ class Scheduler(QObject):
         self._save(task)
         self.fetch(task.id)
         return task
+
+    def submit(self, task: Task, *, preferences: Preferences | None = None) -> Task:
+        """Publish a detached composer snapshot through the scheduler's public API.
+
+        Duplicate confirmation belongs to the application layer. Capture destination
+        and naming before publishing so subsequent preference edits cannot change it.
+        """
+        if self.stopping or task.id in self.tasks:
+            raise ValueError("Task cannot be submitted")
+        task = Task.from_dict(task.to_dict())
+        effective = preferences or self.preferences
+        task.preferences_snapshot = task.preferences_snapshot or asdict(effective)
+        effective = self.preferences_for(task)
+        task.folder = task.folder or effective.folder
+        if task.state == State.READY:
+            configure_destination(task, effective)
+        elif task.state != State.PENDING_METADATA:
+            raise ValueError("Only a source or a prepared task can be submitted")
+        task.auto_start = True
+        self.tasks[task.id] = task
+        self._save(task)
+        if task.state == State.READY:
+            self.enqueue(task.id)
+        else:
+            self.fetch(task.id)
+        return task
+
+    def preferences_for(self, task: Task) -> Preferences:
+        values = {key: value for key, value in task.preferences_snapshot.items()
+                  if key in Preferences.__dataclass_fields__}
+        return replace(self.preferences, **values)
+
+    def retry(self, task_id: str) -> None:
+        task = self.tasks[task_id]
+        if task.state not in {State.READY, State.FAILED, State.CANCELLED, State.INTERRUPTED}:
+            return
+        if task.formats and not task.playlist:
+            self.enqueue(task_id)
+        else:
+            task.auto_start = True
+            self.fetch(task_id)
 
     def fetch(self, task_id: str) -> None:
         task = self.tasks[task_id]
@@ -61,7 +112,7 @@ class Scheduler(QObject):
 
     def _start_job(self, task: Task, mode: str) -> None:
         try:
-            job = EngineJob(task, self.tools, self.preferences, mode, self)
+            job = EngineJob(task, self.tools, self.preferences_for(task), mode, self)
         except (KeyError, ValueError) as exc:
             task.state = State.FAILED
             task.error = "error_engine_missing" if isinstance(exc, KeyError) else "error_invalid_metadata"
@@ -109,7 +160,7 @@ class Scheduler(QObject):
             task.transition(State.FAILED)
         else:
             if not task.playlist and task.selection not in {key for key, _ in choices}:
-                task.selection = preferred_selection(task, self.preferences, task.selection)
+                task.selection = preferred_selection(task, self.preferences_for(task), task.selection)
             task.transition(State.READY)
         self._save(task)
         if task.state == State.READY and task.auto_start and not task.playlist:
@@ -120,7 +171,7 @@ class Scheduler(QObject):
         if task.state not in {State.READY, State.FAILED, State.CANCELLED, State.INTERRUPTED}:
             return
         try:
-            configure_destination(task, self.preferences)
+            configure_destination(task, self.preferences_for(task))
             task.folder = str(validate_folder(task.folder or self.preferences.folder))
         except OSError:
             task.error = "error_folder_unavailable"
@@ -163,14 +214,34 @@ class Scheduler(QObject):
     def _progress(self, task_id: str, progress: object) -> None:
         task = self.tasks[task_id]
         task.error = ""
-        if progress.stage == "postprocess" and task.state == State.DOWNLOADING:
+        state_changed = progress.stage == "postprocess" and task.state == State.DOWNLOADING
+        if state_changed:
             task.transition(State.POSTPROCESSING)
         task.percent = None if progress.stage == "postprocess" else progress.percent
         task.downloaded = progress.downloaded
         task.total = progress.total
         task.speed = progress.speed
         task.eta = progress.eta
-        self._save(task)
+        if state_changed:
+            self._save(task)
+        else:
+            self.pending_progress.add(task_id)
+            if not self.progress_timer.isActive():
+                self.progress_timer.start()
+
+    def _flush_progress(self):
+        pending, self.pending_progress = self.pending_progress, set()
+        now = monotonic()
+        for task_id in pending:
+            task = self.tasks.get(task_id)
+            if not task or task.state not in {State.DOWNLOADING, State.POSTPROCESSING}:
+                continue
+            # A progress checkpoint need not rewrite all extraction metadata on
+            # every engine line. State transitions still persist immediately.
+            if now - self.progress_saved.get(task_id, 0) >= 2:
+                self.database.save(task)
+                self.progress_saved[task_id] = now
+            self.changed.emit(task)
 
     def _stage(self, task_id: str, stage: str) -> None:
         task = self.tasks[task_id]
@@ -184,6 +255,10 @@ class Scheduler(QObject):
         task = self.tasks[task_id]
         task.final_path = files[0]
         task.final_paths = files
+        try:
+            task.final_size = Path(files[0]).stat().st_size
+        except OSError:
+            task.final_size = None
         if task.playlist_count and task.playlist and len(files) < task.playlist_count:
             task.error = f"Only {len(files)} of {task.playlist_count} playlist files were produced"
             task.transition(State.FAILED)
@@ -203,6 +278,8 @@ class Scheduler(QObject):
         self._save(task)
 
     def _job_finished(self, task_id: str) -> None:
+        self.pending_progress.discard(task_id)
+        self.progress_saved.pop(task_id, None)
         job = self.jobs.pop(task_id, None)
         if job:
             job.deleteLater()
@@ -242,6 +319,8 @@ class Scheduler(QObject):
 
     def shutdown(self) -> None:
         self.stopping = True
+        self.progress_timer.stop()
+        self.pending_progress.clear()
         for task in self.tasks.values():
             if task.state in {State.PENDING_METADATA, State.QUEUED}:
                 task.state = State.INTERRUPTED
@@ -256,3 +335,9 @@ class Scheduler(QObject):
                 self.cancel(task.id)
         finally:
             self.stopping = False
+
+    def force_stop(self) -> None:
+        """Escalate an already requested shutdown without blocking the Qt loop."""
+        for job in list(self.jobs.values()):
+            if job.process.state() != job.process.ProcessState.NotRunning:
+                job.process.kill()

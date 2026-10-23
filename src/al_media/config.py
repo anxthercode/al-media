@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QStandardPaths
@@ -62,6 +62,8 @@ class Preferences:
     music_tags: bool = True
     music_cover: bool = True
     close_to_tray: bool = False
+    ask_destination: bool = False
+    recent_folders: list[str] = field(default_factory=list)
     config_revision: int = 6
 
     @classmethod
@@ -76,6 +78,7 @@ class Preferences:
                 value = default
             setattr(result, key, value)
         result.folder = result.folder or str(default_downloads())
+        result.recent_folders = normalize_recent_folders([result.folder, *result.recent_folders])
         result.concurrency = max(1, min(5, result.concurrency))
         if not settings.contains("config_revision") and result.concurrency == 2:
             result.concurrency = 3
@@ -106,3 +109,18 @@ def validate_folder(value: str) -> Path:
     if not path.is_dir() or not os.access(path, os.W_OK):
         raise OSError(f"Folder is not writable: {path}")
     return path
+
+
+def normalize_recent_folders(paths: list[str]) -> list[str]:
+    """Windows path identity, preserving the spelling and MRU order for display."""
+    import ntpath
+
+    result, seen = [], set()
+    for path in paths:
+        if not isinstance(path, str) or not path.strip():
+            continue
+        key = ntpath.normcase(ntpath.normpath(path))
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result[:4]

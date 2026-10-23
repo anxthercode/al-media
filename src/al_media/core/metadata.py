@@ -60,6 +60,33 @@ def selection_kind(selection: str) -> str:
     return "audio" if selection in {"audio", "m4a"} else "video"
 
 
+def expected_container(task: Task) -> str:
+    """A truthful preview of existing command policy, without changing encoding."""
+    if task.selection.startswith("mp3:"):
+        return "MP3"
+    if task.selection == "m4a":
+        return "M4A"
+    if selection_kind(task.selection) == "video":
+        if task.subtitle_language and task.subtitle_mode == "embedded":
+            return "MKV"
+        if task.selection == "mp4":
+            return "MP4"
+        video = [item for item in task.formats if item.get("vcodec") not in (None, "none")]
+        if task.selection.startswith("video:"):
+            limit = int(task.selection.split(":")[1])
+            video = [item for item in video if isinstance(item.get("height"), (int, float)) and item["height"] <= limit]
+        if video:
+            highest = max(item.get("height") or 0 for item in video)
+            candidates = [item for item in video if (item.get("height") or 0) == highest]
+            if all(item.get("acodec") == "none" for item in candidates):
+                return "MKV"
+            extensions = {item.get("ext", "") for item in candidates}
+            if len(extensions) == 1 and all(item.get("acodec") not in (None, "none") for item in candidates):
+                return next(iter(extensions)).upper()
+        return "MKV / MP4"
+    return ""  # Source audio keeps its own codec; don't invent a container.
+
+
 def populate_task(task: Task, info: dict) -> None:
     task.title = str(info.get("title") or info.get("id") or "")
     task.media_id = str(info.get("id") or "")

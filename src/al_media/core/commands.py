@@ -26,7 +26,7 @@ def metadata_args(url: str, tools: dict[str, Path], preferences: Preferences, pl
 def download_args(task: Task, tools: dict[str, Path], preferences: Preferences) -> list[str]:
     output = task.output_stem.replace("%", "%%") + ".%(ext)s" if task.output_stem else f"%(title).180B [%(id)s] [{task.id[:8]}].%(ext)s"
     args = [*common_args(tools, preferences), "--yes-playlist" if task.playlist else "--no-playlist",
-            "--newline", "--progress", "--no-simulate", "--no-overwrites", "--continue", "--part", "--paths", task.folder,
+            "--newline", "--progress", "--progress-delta", "0.25", "--no-simulate", "--no-overwrites", "--continue", "--part", "--paths", task.folder,
             "-o", output, "--windows-filenames",
             "--progress-template", "download:ALM_PROGRESS:download|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s|%(progress._percent_str)s",
             "--progress-template", "postprocess:ALM_PROGRESS:postprocess|NA|NA|NA|NA|NA|NA",
@@ -72,7 +72,13 @@ def download_args(task: Task, tools: dict[str, Path], preferences: Preferences) 
             raise ValueError("Invalid time range")
         args += ["--download-sections", f"*{start:g}-" + (f"{end:g}" if end is not None else "inf")]
         if not is_audio:
-            args += ["--force-keyframes-at-cuts"]
+            # Exact cuts re-encode. FFmpeg's container defaults can otherwise
+            # choose MPEG-4 at ~200 kbit/s, even for a 4K source. VP9 ships in
+            # our LGPL build; explicit constant quality preserves detail and
+            # two threads leave the desktop responsive during concurrent jobs.
+            args += ["--force-keyframes-at-cuts", "--downloader-args",
+                     "ffmpeg_i:-threads 2", "--downloader-args",
+                     "ffmpeg_o:-c:v libvpx-vp9 -crf 18 -b:v 0 -deadline good -cpu-used 4 -row-mt 1 -threads 2 -filter_threads 1 -c:a copy"]
     if task.subtitle_language and task.subtitle_mode != "none":
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", task.subtitle_language):
             raise ValueError("Invalid subtitle language")

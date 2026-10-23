@@ -6,6 +6,8 @@ from pathlib import Path
 
 from al_media.models import Task
 
+from .metadata import selection_kind
+
 TIMING = re.compile(r"(\d+):([0-5]\d):([0-5]\d)[,.](\d{3})\s+-->\s+(\d+):([0-5]\d):([0-5]\d)[,.](\d{3})")
 
 
@@ -80,6 +82,11 @@ def postprocess_plans(task: Task, paths: list[str]) -> list[PostprocessPlan]:
             # than trusting an estimate or re-encoding already suitable audio.
             plans.append(PostprocessPlan(path, None, ["-v", "error", "-select_streams", "a:0", "-show_entries",
                                                       "stream=codec_name,bit_rate", "-of", "json", str(path)], "converting", "ffprobe"))
+        if clipping and selection_kind(task.selection) == "video":
+            # Some non-seekable HTTP sources return a successful FFmpeg exit
+            # with only a container header. Do not report that as a video.
+            plans.append(PostprocessPlan(path, None, ["-v", "error", "-select_streams", "v:0", "-show_entries",
+                                                      "stream=codec_type,width,height", "-of", "json", str(path)], "postprocessing", "ffprobe"))
     return plans
 
 

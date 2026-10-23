@@ -5,12 +5,37 @@ from PySide6.QtCore import QProcessEnvironment
 
 from al_media.config import Preferences
 from al_media.core.engine import EngineJob
+from al_media.core.progress import Progress
 from al_media.core.scheduler import Scheduler
 from al_media.database import Database
 from al_media.models import State, Task
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_engine.py"
 TOOLS = {name: Path(sys.executable) for name in ("yt-dlp", "ffmpeg", "deno")}
+
+
+def test_progress_burst_is_coalesced_and_final_state_is_durable(qtbot, tmp_path, monkeypatch):
+    db = Database(tmp_path / "progress.sqlite3")
+    scheduler = Scheduler(db, TOOLS, Preferences(folder=str(tmp_path)))
+    task = Task("https://fixture.test/video", state=State.DOWNLOADING)
+    scheduler.tasks[task.id] = task
+    writes, updates = [], []
+    save = db.save
+
+    def recording_save(task):
+        writes.append(task.percent)
+        save(task)
+
+    monkeypatch.setattr(db, "save", recording_save)
+    scheduler.changed.connect(lambda task: updates.append(task.percent))
+    for value in range(1000):
+        scheduler._progress(task.id, Progress("download", percent=value / 10))
+    assert not writes and not updates
+    qtbot.waitUntil(lambda: bool(updates))
+    assert writes == [99.9] and updates == [99.9]
+    scheduler._completed(task.id, [str(tmp_path / "video.mkv")])
+    assert db.all()[0].state == State.COMPLETED and db.all()[0].percent == 100
+    db.close()
 
 
 def _job(task, mode, tmp_path):

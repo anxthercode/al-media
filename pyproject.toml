@@ -20,6 +20,9 @@ version = {attr = "al_media.__version__"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"al_media.quick" = ["qml/*.qml", "qml/qmldir", "qml/components/*.qml", "qml/pages/*.qml", "qml/icons/*.svg"]
+
 [tool.ruff]
 line-length = 240
 target-version = "py312"

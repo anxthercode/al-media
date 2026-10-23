@@ -1,4 +1,4 @@
-__version__ = "0.5.0"
+__version__ = "1.0.0"
 
 APP_NAME = "AL Media"
 APP_FULL_NAME = "AnyLoad Media"

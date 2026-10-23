@@ -11,12 +11,12 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from local_engine_smoke_helpers import wait_for
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
-from al_media.config import Preferences, app_root
+from al_media.config import app_root
 from al_media.models import Task
-from al_media.ui.media_preview import ImageCache, MediaPreview
+from al_media.quick.media import MediaViewModel, PreviewProvider
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -46,10 +46,8 @@ def main():
         server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(root)))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        cache = ImageCache()
-        preview = MediaPreview(cache, Preferences(), QIcon())
-        preview.resize(320, 180)
-        preview.show()
+        provider = PreviewProvider()
+        preview = MediaViewModel({}, provider)
         url = f"http://127.0.0.1:{server.server_port}/sprite.png"
         task = Task("https://example.test/video", thumbnail=url, duration=24,
                     formats=[{"protocol": "mhtml", "width": 960, "height": 540, "rows": 2, "columns": 4,
@@ -60,14 +58,14 @@ def main():
             assert Handler.requests == 1, Handler.requests
             for index, color in enumerate(colors):
                 assert preview.frames[index].toImage().pixelColor(20, 20) == color
-            preview.advance()
-            wait_for(lambda: preview.fade == 1.0, 2000)
-            assert preview.timer.interval() == 3000
-            preview.hide()
+            preview._advance()
+            assert preview.source in ("image://preview/" + key for key in provider.images)
+            assert preview.timer.interval() == 2400
+            preview.setActive(False)
             assert not preview.timer.isActive()
-            print("Real HTTP sprite: 8 correct frames, one request, 3-second slideshow, pause when hidden: OK")
+            print("Qt Quick preview: 8 correct HTTP frames, one request, 2.4-second slideshow, pause when hidden: OK")
         finally:
-            preview.close()
+            preview.shutdown()
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
