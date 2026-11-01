@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from time import monotonic
 
 from PySide6.QtCore import QMetaObject, QPointF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter
@@ -104,6 +105,13 @@ def main():
         assert found is not None, name
         return found
 
+    def wait_for_folder(state):
+        deadline = monotonic() + 5
+        while controller.settings.state["folderStatus"] != state and monotonic() < deadline:
+            QTest.qWait(25)
+        assert controller.settings.state["folderStatus"] == state, controller.settings.state
+        QTest.qWait(50)
+
     for width, height in sizes:
         root.resize(width, height)
         for page in ("downloads", "settings", "about"):
@@ -113,13 +121,17 @@ def main():
             captured = root.grabWindow()
             assert not captured.isNull(), "Native render did not produce an image"
             assert captured.save(str(args.output / (suffix + ".png")))
-            for name in {"downloads": ["configuration", "mediaPreview", "downloadButton"], "settings": ["concurrencyField", "downloadFolder"], "about": ["licensesButton", "navAbout"]}[page]:
+            for name in {"downloads": ["configuration", "mediaPreview", "downloadButton", "tracksButton"], "settings": ["concurrencyField", "downloadFolder"],
+                         "about": ["licensesButton", "navAbout", "sourcesGrid", "allSourcesButton", "source-reddit", "source-twitch"]}[page]:
                 obj = item(name)
                 origin = obj.mapToScene(QPointF())
                 results.append(
                     {"viewport": [width, height], "page": page, "item": name, "x": round(origin.x(), 2), "y": round(origin.y(), 2), "width": round(obj.width(), 2), "height": round(obj.height(), 2), "dpr": root.devicePixelRatio()}
                 )
                 assert origin.x() >= -1 and origin.x() + obj.width() <= width + 1, (name, origin.x(), obj.width())
+            if page == "about":
+                assert item("sourcesGrid").width() == item("aboutDivider").width()
+                assert item("allSourcesButton").property("horizontalPadding") >= 12
         # License dialog, native rendering and keyboard close.
         QMetaObject.invokeMethod(root, "showLicenses")
         QTest.qWait(150)
@@ -169,7 +181,9 @@ def main():
     for path in ("about", "settings", "downloads"):
         controller.navigate(path)
         QTest.qWait(30)
-    completed = Task(composer._url, title="Готовое видео", state=State.COMPLETED, source="YouTube", selection="video:1080", final_path="D:/Media/Готовое видео.mp4", final_size=5_000_000)
+    result_fixture = args.output / "Готовое видео.mp4"
+    result_fixture.write_bytes(b"fixture media")
+    completed = Task(composer._url, title="Готовое видео", state=State.COMPLETED, source="YouTube", selection="video:1080", final_path=str(result_fixture.resolve()), final_size=5_000_000)
     scheduler.tasks[completed.id] = completed
     scheduler.changed.emit(completed)
     for width, height in sizes:
@@ -185,6 +199,38 @@ def main():
             action = item(name + completed.id)
             point = action.mapToScene(QPointF())
             assert 0 <= point.x() and point.x() + action.width() <= root.width(), name
+    root.resize(1280, 800)
+    controller.navigate("settings")
+    controller.settings.editFolder("relative/path")
+    controller.settings.applyFolder()
+    wait_for_folder("error")
+    root.grabWindow().save(str(args.output / "folder-validation.png"))
+    controller.settings.editFolder(str(args.output.resolve()))
+    wait_for_folder("found")
+    root.grabWindow().save(str(args.output / "folder-found.png"))
+    planned_folder = args.output.resolve() / "Будущие загрузки"
+    controller.settings.editFolder(str(planned_folder))
+    wait_for_folder("missing")
+    assert not planned_folder.exists()
+    root.grabWindow().save(str(args.output / "folder-new.png"))
+    controller.settings.resetFolder()
+    QMetaObject.invokeMethod(item("recentFolders"), "clicked")
+    QTest.qWait(150)
+    root.grabWindow().save(str(args.output / "recent-paths.png"))
+    QTest.keyClick(root, Qt.Key.Key_Escape)
+    controller.navigate("downloads")
+    composer.setMode("video")
+    composer.task.subtitles = {"ru": [{"ext": "vtt"}], "en": [{"ext": "vtt"}]}
+    composer.changed.emit()
+    composer.setExtra("subtitle", "0:ru")
+    QMetaObject.invokeMethod(item("tracksButton"), "clicked")
+    QTest.qWait(120)
+    root.grabWindow().save(str(args.output / "tracks-embedded.png"))
+    QTest.keyClick(root, Qt.Key.Key_Escape)
+    result_fixture.unlink()
+    controller.downloads.refreshFiles()
+    QTest.qWait(100)
+    root.grabWindow().save(str(args.output / "file-missing.png"))
     report = {"platform": app.platformName(), "geometry": results, "qmlWarnings": presentation.warnings}
     (args.output / "geometry.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     assert not presentation.warnings, "QML emitted runtime warnings; inspect geometry.json"

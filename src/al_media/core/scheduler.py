@@ -29,6 +29,7 @@ class Scheduler(QObject):
         self.tasks = {task.id: task for task in database.all()}
         self.jobs: dict[str, EngineJob] = {}
         self.stopping = False
+        self._cancelling_all = False
         self.batch_ids: set[str] = set()
         self.pending_progress: set[str] = set()
         self.progress_saved: dict[str, float] = {}
@@ -189,7 +190,7 @@ class Scheduler(QObject):
         self.pump()
 
     def pump(self) -> None:
-        if self.stopping:
+        if self.stopping or self._cancelling_all:
             return
         active = sum(task.state in {State.DOWNLOADING, State.POSTPROCESSING}
                      for task in self.tasks.values())
@@ -217,11 +218,17 @@ class Scheduler(QObject):
         state_changed = progress.stage == "postprocess" and task.state == State.DOWNLOADING
         if state_changed:
             task.transition(State.POSTPROCESSING)
-        task.percent = None if progress.stage == "postprocess" else progress.percent
-        task.downloaded = progress.downloaded
-        task.total = progress.total
-        task.speed = progress.speed
-        task.eta = progress.eta
+        if progress.stage == "postprocess":
+            task.percent = task.speed = task.eta = None
+        else:
+            if task.state == State.DOWNLOADING:
+                task.processing_stage = "downloading"
+            # yt-dlp can omit rate/ETA between otherwise valid updates. Keep
+            # the latest facts within the download stage, never after it.
+            for key in ("percent", "downloaded", "total", "speed", "eta"):
+                value = getattr(progress, key)
+                if value is not None:
+                    setattr(task, key, value)
         if state_changed:
             self._save(task)
         else:
@@ -245,6 +252,11 @@ class Scheduler(QObject):
 
     def _stage(self, task_id: str, stage: str) -> None:
         task = self.tasks[task_id]
+        if stage in {"downloading", "preparing_subtitles"}:
+            if task.state == State.DOWNLOADING:
+                task.processing_stage = stage
+                self._save(task)
+            return
         task.processing_stage = stage
         if task.state == State.DOWNLOADING:
             task.transition(State.POSTPROCESSING)
@@ -266,11 +278,13 @@ class Scheduler(QObject):
             return
         task.transition(State.COMPLETED)
         task.percent = 100
+        task.speed = task.eta = None
         self._save(task)
 
     def _failed(self, task_id: str, error_code: str) -> None:
         task = self.tasks[task_id]
         task.error = error_code
+        task.speed = task.eta = None
         if self.stopping and error_code == "cancelled":
             task.state = State.INTERRUPTED
         else:
@@ -298,9 +312,10 @@ class Scheduler(QObject):
 
     def cancel(self, task_id: str) -> None:
         task = self.tasks[task_id]
+        task.auto_start = False
         if task_id in self.jobs:
             self.jobs[task_id].cancel()
-        elif task.state in {State.PENDING_METADATA, State.READY, State.QUEUED}:
+        if task.state in {State.PENDING_METADATA, State.READY, State.QUEUED}:
             task.transition(State.CANCELLED)
             self._save(task)
             self.pump()
@@ -329,12 +344,13 @@ class Scheduler(QObject):
             job.cancel()
 
     def cancel_all(self) -> None:
-        self.stopping = True
+        self._cancelling_all = True
         try:
             for task in list(self.tasks.values()):
                 self.cancel(task.id)
         finally:
-            self.stopping = False
+            self._cancelling_all = False
+        self.pump()
 
     def force_stop(self) -> None:
         """Escalate an already requested shutdown without blocking the Qt loop."""

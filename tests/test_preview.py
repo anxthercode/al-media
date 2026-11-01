@@ -17,7 +17,7 @@ def test_quick_preview_ignores_stale_poster_and_pauses_frames(qapp, monkeypatch)
     try:
         preview.set_task(Task("https://example.test/first", thumbnail="https://example.test/old.jpg"))
         preview.set_task(Task("https://example.test/second", thumbnail="https://example.test/new.jpg"))
-        old, current = QPixmap(160, 90), QPixmap(160, 90)
+        old, current = QPixmap(1280, 720), QPixmap(1280, 720)
         old.fill(QColor("red"))
         current.fill(QColor("blue"))
         callbacks[0](old)
@@ -27,6 +27,7 @@ def test_quick_preview_ignores_stale_poster_and_pauses_frames(qapp, monkeypatch)
         preview._frame(0, old)
         preview._frame(1, current)
         assert preview.timer.isActive()
+        preview.index = 0
         preview._advance()
         assert provider.images[preview.source.rsplit("/", 1)[1]].pixelColor(0, 0) == QColor("blue")
         preview.setActive(False)
@@ -80,3 +81,43 @@ def test_best_metadata_cover_and_fallback_candidates():
         {"url": "https://example.test/medium.jpg", "width": 1280, "height": 720}]})
     assert task.thumbnail.endswith("/large.jpg")
     assert task.thumbnail_candidates == ["https://example.test/large.jpg", "https://example.test/small.jpg", "https://example.test/medium.jpg"]
+
+
+def test_large_preview_rejects_tiny_sprites_and_never_regresses_to_sprites(qapp, monkeypatch):
+    from PySide6.QtGui import QColor, QPixmap
+
+    from al_media.quick.media import MediaViewModel, PreviewProvider
+
+    preview = MediaViewModel({}, PreviewProvider())
+    callbacks = []
+    monkeypatch.setattr(preview.cache, "fetch", lambda url, callback, **kwargs: callbacks.append((url, callback)))
+    monkeypatch.setattr(preview.extractor, "set_task", lambda task: None)
+    monkeypatch.setattr(preview.extractor, "set_enabled", lambda active: None)
+    task = Task("https://example.test/video", thumbnail="https://example.test/poster.jpg", duration=20, formats=[{
+        "protocol": "mhtml", "width": 160, "height": 90, "rows": 2, "columns": 4,
+        "fps": .4, "fragments": [{"url": "https://example.test/tiny.jpg"}]}])
+    try:
+        preview.set_task(task)
+        assert [url for url, _ in callbacks] == [task.thumbnail]  # Tiny sheets are not even requested.
+        tiny, good, sprite = QPixmap(160, 90), QPixmap(1280, 720), QPixmap(960, 540)
+        good.fill(QColor("blue"))
+        sprite.fill(QColor("red"))
+        preview._frame(0, tiny)
+        assert not preview.frames and not preview.timer.isActive()
+        preview._frame(0, sprite, storyboard=True)
+        preview._frame(1, sprite, storyboard=True)
+        preview._frame(0, good)
+        assert list(preview.frames) == [0]
+        preview._frame(1, sprite, storyboard=True)  # A delayed sprite cannot reintroduce blur.
+        assert list(preview.frames) == [0]
+        preview._advance()
+        source = preview.source
+        callbacks[0][1](sprite)  # A late cover must not interrupt the slideshow either.
+        assert preview.source == source
+        preview.setActive(False)
+        assert not preview.timer.isActive()
+        preview.set_task(None)
+        preview._frame(0, good)
+        assert not preview.frames
+    finally:
+        preview.shutdown()

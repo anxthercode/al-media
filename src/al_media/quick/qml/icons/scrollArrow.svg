@@ -1,0 +1,4 @@
+<!-- Original AL Media scrollbar arrow, rendered at the display's pixel density. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8" fill="currentColor">
+  <path d="M5.25 1.05a1 1 0 0 1 1.5 0l4.4 5.05A.7.7 0 0 1 10.62 7.25H1.38a.7.7 0 0 1-.53-1.15z"/>
+</svg>

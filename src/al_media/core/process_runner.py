@@ -18,9 +18,10 @@ class ProcessRunner(QObject):
     output = Signal(str, bytes)
     finished = Signal(int)
 
-    def __init__(self, arguments, channel, parent=None):
+    def __init__(self, arguments, channel, parent=None, *, discard_stderr=False):
         super().__init__(parent)
         self.arguments, self.channel = arguments, channel
+        self.discard_stderr = discard_stderr
         self.cancelled = Event()
         self.process = None
         self.thread = None
@@ -45,7 +46,9 @@ class ProcessRunner(QObject):
     def _run(self):
         code = 1
         try:
-            with subprocess.Popen(self.arguments, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            if self.cancelled.is_set():
+                return
+            with subprocess.Popen(self.arguments, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if self.discard_stderr else subprocess.STDOUT,
                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0) as process:
                 self.process = process
                 if self.cancelled.is_set():

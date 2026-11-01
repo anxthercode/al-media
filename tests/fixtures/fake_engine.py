@@ -9,6 +9,11 @@ from pathlib import Path
 
 args = sys.argv[1:]
 if "-J" in args:
+    if "slow.test" in args[-1]:
+        time.sleep(60)
+    if "protected.test" in args[-1]:
+        print("ERROR: This video is DRM protected", file=sys.stderr)
+        sys.exit(1)
     if "failure.test" in args[-1]:
         print("ERROR: Unsupported URL", file=sys.stderr)
         sys.exit(1)

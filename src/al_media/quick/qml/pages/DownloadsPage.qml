@@ -29,7 +29,18 @@ Item {
         keyNavigationEnabled: false
         activeFocusOnTab: false
         model: ui.queue
-        ScrollBar.vertical: UiScrollBar { width: 8; policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: UiScrollBar {
+            objectName: "downloadsScrollBar"
+            parent: page
+            edge: true
+            scrollTarget: jobs
+            upText: ui.t("scroll_up")
+            downText: ui.t("scroll_down")
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: parent.right
+            z: 10
+        }
         header: Column {
             property alias urlField: url
             property alias folderTrigger: folderButton
@@ -56,7 +67,7 @@ Item {
                     Keys.onPressed: event => {
                         if (event.matches(StandardKey.Paste)) { ui.services.pasteSource(); event.accepted = true; }
                     }
-                    UiIcon { name: "link"; x: 14; width: 18; height: 18; anchors.verticalCenter: parent.verticalCenter; tint: Theme.quiet }
+                    UiIcon { name: "link"; x: 14; width: 20; height: 20; anchors.verticalCenter: parent.verticalCenter; tint: url.activeFocus ? Theme.accent : Theme.muted }
                     UiButton { objectName: "clearUrl"; anchors.right: parent.right; anchors.rightMargin: 6; anchors.verticalCenter: parent.verticalCenter; width: 36; ghost: true; compact: true; iconName: "close"; tip: ui.t("clear_link"); visible: url.text.length > 0; onClicked: composer.setUrl("") }
                     TapHandler { acceptedButtons: Qt.RightButton; onTapped: urlMenu.popup() }
                     Menu {
@@ -88,9 +99,16 @@ Item {
                         width: Math.min(520, parent.width)
                         spacing: 12
                         UiSpinner { objectName: "analysisSpinner"; running: page.composerState.phase === "loading"; anchors.horizontalCenter: parent.horizontalCenter; Accessible.name: ui.t("analyzing") }
-                        UiText { objectName: "composerHeading"; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: ui.t(page.composerState.phase === "loading" ? "analyzing" : page.composerState.phase === "batch" ? "batch" : page.composerState.phase === "error" ? "analysis_failed" : "start_link"); font.pixelSize: 24; font.weight: Font.DemiBold }
-                        UiText { objectName: "composerHelp"; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: ui.t(page.composerState.phase === "loading" ? "analyzing_help" : page.composerState.phase === "batch" ? "batch_help" : page.composerState.phase === "error" ? "analysis_failed_help" : "start_help"); color: Theme.muted }
-                        UiButton { visible: page.composerState.phase === "batch"; anchors.horizontalCenter: parent.horizontalCenter; width: Math.min(320, parent.width); text: ui.t("download_now"); primary: true; iconName: "download"; onClicked: composer.download() }
+                        UiText { objectName: "composerHeading"; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: ui.t(page.composerState.phase === "choice" ? "playlist_choice" : page.composerState.phase === "loading" ? "analyzing" : page.composerState.phase === "batch" ? "batch" : page.composerState.phase === "error" ? "analysis_failed" : "start_link"); font.pixelSize: 24; font.weight: Font.DemiBold }
+                        UiText { objectName: "composerHelp"; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: ui.t(page.composerState.phase === "choice" ? "playlist_choice_help" : page.composerState.phase === "loading" ? "analyzing_help" : page.composerState.phase === "batch" ? "batch_help" : page.composerState.phase === "error" ? "analysis_failed_help" : "start_help"); color: Theme.muted }
+                        Row {
+                            visible: page.composerState.phase === "choice"
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            spacing: 8
+                            UiButton { objectName: "onlyVideo"; height: 40; text: ui.t("only_video"); onClicked: composer.choosePlaylist(false) }
+                            UiButton { objectName: "choosePlaylist"; height: 40; text: ui.t("choose_playlist"); primary: true; onClicked: composer.choosePlaylist(true) }
+                        }
+                        UiButton { visible: page.composerState.phase === "batch"; anchors.horizontalCenter: parent.horizontalCenter; width: Math.min(320, parent.width); height: 48; text: ui.t("download_now"); primary: true; iconName: "download"; onClicked: composer.download() }
                     }
                     Column {
                         id: configuration
@@ -102,27 +120,40 @@ Item {
                         UiText { width: parent.width; text: [page.composerState.author, page.composerState.source, page.composerState.duration].filter(s => s.length > 0).join("  ·  "); color: Theme.muted; topPadding: 6; bottomPadding: 16 }
                         Rectangle {
                             id: modes
+                            property string requestedMode: ""
+                            readonly property string displayedMode: requestedMode || page.composerState.mode
+                            function choose(mode) {
+                                if (mode === displayedMode) return;
+                                requestedMode = mode;
+                                Qt.callLater(commitMode);
+                            }
+                            function commitMode() {
+                                composer.setMode(requestedMode);
+                                requestedMode = "";
+                            }
                             width: parent.width
                             height: 48
                             radius: 6
                             color: Theme.surface
                             border.color: Theme.field
-                            visible: !page.composerState.isPlaylist
+                            visible: true
                             Rectangle {
-                                width: (parent.width - 8) / 2
+                                objectName: "modeHighlight"
+                                width: (modes.width - 12) / 2
                                 height: 40
-                                x: page.composerState.mode === "video" ? 4 : 4 + width
+                                x: modes.displayedMode === "video" ? 4 : width + 8
                                 y: 4
                                 radius: 5
                                 color: Theme.surface3
                                 border.color: Theme.field
-                                Behavior on x { NumberAnimation { duration: Theme.motion; easing.type: Easing.InOutCubic } }
+                                Behavior on x { SmoothedAnimation { duration: Theme.reducedMotion ? 0 : 180; velocity: -1; reversingMode: SmoothedAnimation.Immediate } }
                             }
                             Row {
                                 anchors.fill: parent
                                 anchors.margins: 4
-                                UiButton { objectName: "videoMode"; width: parent.width / 2; height: 40; ghost: true; text: ui.t("video_mode"); enabled: page.composerState.videoAvailable; font.weight: page.composerState.mode === "video" ? Font.DemiBold : Font.Normal; onClicked: composer.setMode("video") }
-                                UiButton { objectName: "audioMode"; width: parent.width / 2; height: 40; ghost: true; text: ui.t("audio_mode"); enabled: page.composerState.audioAvailable; font.weight: page.composerState.mode === "audio" ? Font.DemiBold : Font.Normal; onClicked: composer.setMode("audio") }
+                                spacing: 4
+                                UiButton { objectName: "videoMode"; width: (parent.width - parent.spacing) / 2; height: 40; segment: true; drawSelection: false; selected: modes.displayedMode === "video"; text: ui.t("video_mode"); enabled: page.composerState.videoAvailable; font.weight: selected ? Font.DemiBold : Font.Normal; onClicked: modes.choose("video") }
+                                UiButton { objectName: "audioMode"; width: (parent.width - parent.spacing) / 2; height: 40; segment: true; drawSelection: false; selected: modes.displayedMode === "audio"; text: ui.t("audio_mode"); enabled: page.composerState.audioAvailable; font.weight: selected ? Font.DemiBold : Font.Normal; onClicked: modes.choose("audio") }
                             }
                         }
                         Item { width: 1; height: 12 }
@@ -197,22 +228,55 @@ Item {
                         }
                         Row {
                             id: extras
+                            visible: !page.composerState.isPlaylist
                             width: parent.width
                             height: 40
                             spacing: 8
                             leftPadding: (width - crop.width - (more.visible ? more.width + spacing : 0)) / 2
                             UiButton { id: crop; objectName: "cropButton"; height: 36; iconName: "trim"; iconSize: 16; horizontalPadding: 10; text: page.composerState.hasRange ? page.composerState.rangeLabel : ui.t("crop"); enabled: !page.composerState.isPlaylist; onClicked: composer.toggleRange() }
-                            UiButton { id: more; visible: page.composerState.hasExtra; height: 36; iconName: "settings"; tip: ui.t("more_tracks"); width: 36; compact: true; onClicked: tracks.open() }
+                            Item {
+                                id: more
+                                width: tracksButton.implicitWidth
+                                height: 36
+                                UiButton {
+                                    id: tracksButton
+                                    objectName: "tracksButton"
+                                    anchors.fill: parent
+                                    enabled: page.composerState.hasExtra
+                                    iconName: "captions"
+                                    iconSize: 16
+                                    text: ui.t("tracks_short")
+                                    tip: enabled ? ui.t("more_tracks") : ""
+                                    compact: true
+                                    Accessible.name: ui.t("more_tracks")
+                                    Accessible.description: enabled ? "" : ui.t("tracks_unavailable")
+                                    onClicked: tracks.open()
+                                }
+                                // The enabled wrapper receives hover while the
+                                // actual button remains disabled for all input.
+                                HoverHandler { id: unavailableHover; enabled: !tracksButton.enabled }
+                                ToolTip {
+                                    objectName: "tracksUnavailableTip"
+                                    visible: unavailableHover.hovered && !tracksButton.enabled
+                                    text: ui.t("tracks_unavailable")
+                                    delay: 500
+                                    padding: 8
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: 12
+                                    background: Rectangle { color: Theme.surface3; border.color: Theme.field; radius: 6 }
+                                }
+                            }
                         }
                         Item { height: 12; width: 1 }
-                        UiButton { objectName: "downloadButton"; width: parent.width; height: 48; primary: true; iconName: "download"; text: ui.t("download_now"); enabled: page.composerState.canDownload && !ui.services.closing; onClicked: composer.download() }
+                        UiButton { objectName: "downloadButton"; width: parent.width; height: 48; primary: true; iconName: "download"; text: ui.t(page.composerState.isPlaylist ? "select_items" : "download_now"); enabled: page.composerState.canDownload && !ui.services.closing; onClicked: composer.download() }
+                        Item { width: 1; height: 8 }
                         RowLayout {
                             width: parent.width
-                            height: 30
+                            height: 32
                             spacing: 8
-                            UiText { text: page.composerState.container + " · ≈ " + page.composerState.estimated; font.pixelSize: 12; color: Theme.muted; wrapMode: Text.NoWrap }
+                            UiText { objectName: "outputSummary"; visible: !page.composerState.isPlaylist; text: [page.composerState.container, page.composerState.estimated ? "≈ " + page.composerState.estimated : ""].filter(s => s.length > 0).join(" · "); font.pixelSize: 12; color: Theme.muted; wrapMode: Text.NoWrap }
                             UiText { text: ui.settings.state.ask_destination ? ui.t("ask_destination") : ui.settings.state.folder; Layout.fillWidth: true; elide: Text.ElideMiddle; wrapMode: Text.NoWrap; font.pixelSize: 12; color: Theme.muted }
-                            UiButton { id: folderButton; objectName: "changeFolder"; text: ui.t("change_folder"); ghost: true; compact: true; height: 24; font.pixelSize: 12; onClicked: ui.services.changeFolder() }
+                            UiButton { id: folderButton; objectName: "changeFolder"; text: ui.t("change_folder"); ghost: true; compact: true; Layout.preferredHeight: 28; Layout.minimumHeight: 28; Layout.maximumHeight: 28; font.pixelSize: 12; onClicked: ui.services.changeFolder() }
                         }
                         UiText { width: parent.width; visible: page.composerState.rangeDirty && !page.composerState.rangeOpen; text: ui.t("range_pending"); color: Theme.warning; font.pixelSize: 12 }
                     }
@@ -227,7 +291,7 @@ Item {
                         color: Theme.surface
                         clip: true
                         Image { id: poster; objectName: "previewImage"; anchors.fill: parent; source: ui.media.source; fillMode: Image.PreserveAspectFit; smooth: true; cache: false }
-                        UiText { visible: !ui.media.source; anchors.centerIn: parent; text: ui.t("no_preview"); color: Theme.muted; font.pixelSize: 12 }
+                        UiText { visible: !ui.media.source; anchors.centerIn: parent; text: page.composerState.isPlaylist ? page.composerState.duration : ui.t("no_preview"); color: Theme.muted; font.pixelSize: page.composerState.isPlaylist ? 24 : 12 }
                     }
                 }
             }
@@ -238,7 +302,8 @@ Item {
                 width: parent.width
                 height: 36
                 UiText { text: ui.t("jobs_files"); font.pixelSize: 16; font.weight: Font.DemiBold; Layout.fillWidth: true }
-                UiButton { objectName: "clearCompleted"; visible: ui.queue.completedCount > 0; text: ui.t("clear_list"); ghost: true; compact: true; font.pixelSize: 12; onClicked: ui.services.clearCompleted() }
+                UiButton { objectName: "cancelAll"; visible: ui.queue.activeCount > 0; text: ui.t("cancel_all"); ghost: true; compact: true; font.pixelSize: 12; height: 32; onClicked: ui.services.cancelAll() }
+                UiButton { objectName: "clearCompleted"; visible: ui.queue.clearableCount > 0; text: ui.t("clear_list"); ghost: true; compact: true; font.pixelSize: 12; height: 32; onClicked: ui.services.clearCompleted() }
             }
         }
         delegate: JobRow { width: jobs.width - 10; ui: page.ui }
@@ -256,6 +321,7 @@ Item {
     }
     Dialog {
         id: tracks
+        objectName: "tracksDialog"
         parent: Overlay.overlay
         anchors.centerIn: parent
         width: 480
@@ -266,10 +332,10 @@ Item {
             spacing: 12
             UiText { text: ui.t("more_tracks"); font.pixelSize: 20; font.weight: Font.DemiBold }
             UiText { text: ui.t("audio_track"); color: Theme.muted; font.pixelSize: 12 }
-            UiCombo { Layout.fillWidth: true; model: page.composerState.tracks; value: page.composerState.track; onChosen: value => composer.setExtra("track", value) }
-            UiText { text: ui.t("subtitles"); color: Theme.muted; font.pixelSize: 12 }
-            UiCombo { Layout.fillWidth: true; model: page.composerState.subtitles; value: page.composerState.subtitle; onChosen: value => composer.setExtra("subtitle", value) }
-            UiCombo { Layout.fillWidth: true; visible: page.composerState.subtitle !== ""; model: page.composerState.mode === "video" ? [{value:"sidecar", label:ui.t("sidecar")}, {value:"embedded", label:ui.t("embedded")}] : [{value:"sidecar",label:ui.t("sidecar")}]; value: page.composerState.subtitleMode; onChosen: value => composer.setExtra("subtitleMode", value) }
+            UiCombo { objectName: "audioTrackPicker"; Layout.fillWidth: true; model: page.composerState.tracks; value: page.composerState.track; Accessible.name: ui.t("audio_track"); onChosen: value => composer.setExtra("track", value) }
+            UiText { visible: page.composerState.mode === "video"; text: ui.t("subtitles"); color: Theme.muted; font.pixelSize: 12 }
+            UiCombo { objectName: "subtitlePicker"; Layout.fillWidth: true; visible: page.composerState.mode === "video"; model: page.composerState.subtitles; value: page.composerState.subtitle; Accessible.name: ui.t("subtitles"); onChosen: value => composer.setExtra("subtitle", value) }
+            UiText { objectName: "subtitleStorageHint"; Layout.fillWidth: true; visible: page.composerState.mode === "video" && page.composerState.subtitle !== ""; text: ui.t("subtitles_embedded_hint"); color: Theme.quiet; font.pixelSize: 12 }
             UiButton { text: ui.t("close"); Layout.alignment: Qt.AlignRight; onClicked: tracks.close() }
         }
         Overlay.modal: Rectangle { color: "#aa000000" }

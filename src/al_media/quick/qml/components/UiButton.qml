@@ -8,6 +8,8 @@ Button {
     property bool ghost: false
     property bool selected: false
     property bool compact: false
+    property bool segment: false
+    property bool drawSelection: true
     property string iconName: ""
     property string tip: ""
     property bool iconAfter: false
@@ -15,7 +17,7 @@ Button {
     property real iconRotation: 0
     horizontalPadding: compact ? 8 : 14
     implicitWidth: contentRow.implicitWidth + horizontalPadding * 2
-    implicitHeight: primary ? 48 : 36
+    implicitHeight: 36
     padding: 0
     hoverEnabled: true
     opacity: enabled ? 1 : 0.42
@@ -26,12 +28,12 @@ Button {
     ToolTip.text: tip
     ToolTip.delay: 500
     background: Rectangle {
-        radius: 6
-        color: control.primary ? (control.hovered ? Theme.primaryHover : Theme.primary) : control.selected ? Theme.tint : control.hovered ? Theme.surface3 : control.ghost ? "transparent" : Theme.surface2
-        border.width: control.primary || control.ghost && !control.selected ? 0 : 1
-        border.color: control.selected ? Theme.navBorder : control.hovered ? Theme.quiet : Theme.field
+        radius: control.segment ? 5 : 6
+        color: control.segment ? (control.selected ? (control.drawSelection ? Theme.surface3 : "transparent") : control.hovered ? Theme.surface2 : "transparent") : control.primary ? (control.hovered ? Theme.primaryHover : Theme.primary) : control.selected ? Theme.tint : control.hovered ? Theme.surface3 : control.ghost ? "transparent" : Theme.surface2
+        border.width: control.segment ? (control.selected && control.drawSelection ? 1 : 0) : control.primary || control.ghost && !control.selected ? 0 : 1
+        border.color: control.segment ? Theme.field : control.selected ? Theme.navBorder : control.hovered ? Theme.quiet : Theme.field
         Behavior on color { ColorAnimation { duration: Theme.motion } }
-        Rectangle { anchors.fill: parent; anchors.margins: -4; radius: 8; color: "transparent"; border.width: 2; border.color: Theme.accent; visible: control.visualFocus }
+        Rectangle { anchors.fill: parent; anchors.margins: 2; radius: control.segment ? 3 : 4; color: "transparent"; border.width: 2; border.color: Theme.accent; visible: control.visualFocus }
     }
     contentItem: Item {
         Row {
@@ -47,7 +49,7 @@ Button {
                 rotation: control.iconRotation
                 Behavior on rotation { NumberAnimation { duration: Theme.reducedMotion ? 0 : 180; easing.type: Easing.OutCubic } }
             }
-            UiText { visible: text.length > 0; text: control.text; color: control.primary ? "white" : control.selected ? Theme.accent : Theme.fg; font.pixelSize: control.font.pixelSize; font.weight: control.primary ? Font.DemiBold : control.font.weight; wrapMode: Text.NoWrap; anchors.verticalCenter: parent.verticalCenter }
+            UiText { visible: text.length > 0; text: control.text; color: control.primary ? "white" : control.selected && !control.segment ? Theme.accent : Theme.fg; font.pixelSize: control.font.pixelSize; font.weight: control.primary ? Font.DemiBold : control.font.weight; wrapMode: Text.NoWrap; anchors.verticalCenter: parent.verticalCenter }
         }
     }
 }

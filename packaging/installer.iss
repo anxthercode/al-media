@@ -45,6 +45,8 @@ Type: files; Name: "{userprograms}\Universal Media Studio\Universal Media Studio
 Type: dirifempty; Name: "{userprograms}\Universal Media Studio"
 Type: files; Name: "{app}\_internal\icuuc.dll"
 Type: files; Name: "{app}\_internal\icudt78.dll"
+; Notices moved to assets/licenses; remove the previous app-owned copy on upgrade.
+Type: files; Name: "{app}\THIRD_PARTY_NOTICES.md"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "AnyLoadMedia.ALMedia"

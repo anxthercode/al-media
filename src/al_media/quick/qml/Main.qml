@@ -17,6 +17,10 @@ ApplicationWindow {
     readonly property bool compact: width <= 1100
     readonly property int pagePadding: compact ? 20 : 28
     readonly property int headerHeight: height <= 760 ? 60 : 64
+    readonly property real jobActionsWidth: Math.ceil(Math.max(actionMetrics.advanceWidth(t("open")) + 28 + 28 + 84,
+                                                             actionMetrics.advanceWidth(t("retry")) + 16 + 42,
+                                                             actionMetrics.advanceWidth(t("cancel")) + 16))
+    FontMetrics { id: actionMetrics; font.family: Theme.fontFamily; font.pixelSize: 14 }
     property bool systemLight: Application.styleHints.colorScheme === Qt.Light
     property bool reducedMotion: false
     property string uiFontFamily: "Segoe UI"
@@ -45,6 +49,7 @@ ApplicationWindow {
     Binding { target: Theme; property: "reducedMotion"; value: root.reducedMotion }
     Binding { target: Theme; property: "fontFamily"; value: root.uiFontFamily }
     onClosing: close => { close.accepted = services.requestClose(); }
+    onActiveChanged: { if (active) queue.refreshFiles(); }
     onVisibilityChanged: visibility => media.setActive(visible && visibility !== Window.Minimized && services.page === "downloads")
     Shortcut { sequence: "Ctrl+L"; onActivated: { services.navigate("downloads"); downloads.focusUrl(); } }
     Shortcut { sequence: "Escape"; enabled: composer.state.rangeOpen; onActivated: composer.closeRange() }
@@ -130,9 +135,11 @@ ApplicationWindow {
     }
     Dialog {
         id: duplicate
+        objectName: "duplicateDialog"
+        readonly property real actionWidth: Math.max(cancelDuplicate.implicitWidth, openDuplicate.implicitWidth, repeatDuplicate.implicitWidth)
         parent: Overlay.overlay
         anchors.centerIn: parent
-        width: Math.min(480, root.width - 48)
+        width: Math.min(Math.max(480, duplicateActions.implicitWidth + leftPadding + rightPadding), root.width - 48)
         modal: true
         title: root.t("duplicate")
         padding: 24
@@ -140,12 +147,14 @@ ApplicationWindow {
         header: UiText { text: duplicate.title; font.pixelSize: 20; font.weight: Font.DemiBold; padding: 24; bottomPadding: 0 }
         contentItem: ColumnLayout {
             spacing: 24
-            UiText { text: root.t("repeat_question"); Layout.fillWidth: true }
+            UiText { objectName: "duplicateQuestion"; text: root.t("repeat_question"); Layout.fillWidth: true }
             RowLayout {
-                Layout.alignment: Qt.AlignRight
-                UiButton { text: root.t("cancel"); onClicked: duplicate.reject() }
-                UiButton { text: root.t("open"); visible: services.duplicateCanOpen; onClicked: { services.openDuplicate(); duplicate.accept(); } }
-                UiButton { text: root.t("download_again"); primary: true; onClicked: { services.confirmDuplicate(true, true); duplicate.accept(); } }
+                id: duplicateActions
+                Layout.fillWidth: true
+                spacing: 8
+                UiButton { id: cancelDuplicate; objectName: "cancelDuplicate"; Layout.fillWidth: true; Layout.preferredWidth: duplicate.actionWidth; Layout.minimumWidth: duplicate.actionWidth; Layout.preferredHeight: 40; Layout.minimumHeight: 40; Layout.maximumHeight: 40; text: root.t("cancel"); onClicked: duplicate.reject() }
+                UiButton { id: openDuplicate; objectName: "openDuplicate"; Layout.fillWidth: true; Layout.preferredWidth: duplicate.actionWidth; Layout.minimumWidth: duplicate.actionWidth; Layout.preferredHeight: 40; Layout.minimumHeight: 40; Layout.maximumHeight: 40; text: root.t("open"); visible: services.duplicateCanOpen; onClicked: { services.openDuplicate(); duplicate.accept(); } }
+                UiButton { id: repeatDuplicate; objectName: "repeatDuplicate"; Layout.fillWidth: true; Layout.preferredWidth: duplicate.actionWidth; Layout.minimumWidth: duplicate.actionWidth; Layout.preferredHeight: 40; Layout.minimumHeight: 40; Layout.maximumHeight: 40; text: root.t("download_again"); primary: true; onClicked: { services.confirmDuplicate(true, true); duplicate.accept(); } }
             }
         }
         onRejected: services.confirmDuplicate(false, false)
@@ -153,6 +162,7 @@ ApplicationWindow {
     }
     Dialog {
         id: playlist
+        objectName: "playlistDialog"
         property var selectedIds: []
         parent: Overlay.overlay
         anchors.centerIn: parent
@@ -165,28 +175,34 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 12
             RowLayout {
-                UiButton { text: root.t("select_all"); onClicked: playlist.selectedIds = services.playlistEntries.filter(e => e.url.length > 0).map(e => e.index) }
-                UiButton { text: root.t("select_none"); onClicked: playlist.selectedIds = [] }
+                UiButton { objectName: "selectAllPlaylist"; Layout.preferredHeight: 40; Layout.minimumHeight: 40; Layout.maximumHeight: 40; text: root.t("select_all"); onClicked: playlist.selectedIds = services.playlistEntries.filter(e => e.url.length > 0).map(e => e.index) }
+                UiButton { objectName: "selectNonePlaylist"; Layout.preferredHeight: 40; Layout.minimumHeight: 40; Layout.maximumHeight: 40; text: root.t("select_none"); onClicked: playlist.selectedIds = [] }
             }
             ListView {
+                objectName: "playlistList"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
+                acceptedButtons: Qt.NoButton
+                spacing: 4
                 model: services.playlistEntries
                 delegate: UiCheck {
                     required property var modelData
-                    width: ListView.view.width
-                    text: modelData.title
+                    width: ListView.view.width - 12
+                    height: Math.max(40, contentItem.implicitHeight + 12)
+                    opacity: enabled ? 1 : 0.45
+                    objectName: "playlistEntry" + modelData.index
+                    text: modelData.index + ". " + modelData.title + (modelData.url.length > 0 ? "" : " · " + root.t("playlist_unavailable"))
                     enabled: modelData.url.length > 0
                     checked: playlist.selectedIds.indexOf(modelData.index) >= 0
                     onToggled: { let rows = playlist.selectedIds.slice(); if (checked) rows.push(modelData.index); else rows = rows.filter(i => i !== modelData.index); playlist.selectedIds = rows; }
                 }
-                ScrollBar.vertical: ScrollBar { }
+                ScrollBar.vertical: UiScrollBar { }
             }
             RowLayout {
                 UiText { text: playlist.selectedIds.length + " / " + services.playlistEntries.length; Layout.fillWidth: true; color: Theme.muted }
-                UiButton { text: root.t("cancel"); onClicked: playlist.reject() }
-                UiButton { text: root.t("download_now"); primary: true; enabled: playlist.selectedIds.length > 0; onClicked: { services.acceptPlaylist(playlist.selectedIds); playlist.accept(); } }
+                UiButton { objectName: "cancelPlaylist"; Layout.preferredHeight: 40; Layout.minimumHeight: 40; Layout.maximumHeight: 40; text: root.t("cancel"); onClicked: playlist.reject() }
+                UiButton { objectName: "downloadPlaylist"; Layout.preferredHeight: 40; Layout.minimumHeight: 40; Layout.maximumHeight: 40; text: root.t("download_now"); primary: true; enabled: playlist.selectedIds.length > 0; onClicked: { services.acceptPlaylist(playlist.selectedIds); playlist.accept(); } }
             }
         }
         Overlay.modal: Rectangle { color: "#aa000000" }
@@ -211,7 +227,15 @@ ApplicationWindow {
             boundsBehavior: Flickable.StopAtBounds
             acceptedButtons: Qt.NoButton
             onContentHeightChanged: { if (contentY > Math.max(0, contentHeight - height)) contentY = Math.max(0, contentHeight - height); }
-            ScrollBar.vertical: UiScrollBar { objectName: "licenseScrollBar"; width: 8; anchors.right: parent.right; anchors.rightMargin: 4 }
+            ScrollBar.vertical: UiScrollBar {
+                objectName: "licenseScrollBar"
+                edge: true
+                scrollTarget: licenseScroll
+                upText: root.t("scroll_up")
+                downText: root.t("scroll_down")
+                anchors.right: parent.right
+                anchors.rightMargin: 2
+            }
             Column {
                 id: licenseContent
                 width: licenseScroll.width

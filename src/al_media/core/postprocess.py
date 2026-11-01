@@ -7,8 +7,17 @@ from pathlib import Path
 from al_media.models import Task
 
 from .metadata import selection_kind
+from .subtitles import subtitle_tag
 
 TIMING = re.compile(r"(\d+):([0-5]\d):([0-5]\d)[,.](\d{3})\s+-->\s+(\d+):([0-5]\d):([0-5]\d)[,.](\d{3})")
+
+
+class SubtitlesUnavailable(ValueError):
+    pass
+
+
+def subtitle_path(task: Task, path: Path) -> Path:
+    return path.with_name(f"{path.stem}.{task.subtitle_language}.srt")
 
 
 def _milliseconds(groups):
@@ -61,22 +70,29 @@ def postprocess_plans(task: Task, paths: list[str]) -> list[PostprocessPlan]:
     clipping = task.clip_start is not None or task.clip_end is not None
     for filename in paths:
         path = Path(filename)
-        if clipping and task.subtitle_language and task.subtitle_mode != "none":
-            subtitles = [p for p in path.parent.iterdir() if p.name.startswith(path.stem + ".") and p.name.endswith(f".{task.subtitle_language}.srt")]
-            if not subtitles:
-                raise ValueError("Requested subtitle file is missing")
-            for subtitle in subtitles:
+        if task.subtitle_language and task.subtitle_mode != "none":
+            subtitle = subtitle_path(task, path)
+            if not subtitle.is_file():
+                raise SubtitlesUnavailable("Requested subtitle file is missing")
+            if clipping:
                 backup = subtitle.with_name(f".{subtitle.name}.{task.id[:8]}.source")
                 if not backup.exists():
                     backup.write_bytes(subtitle.read_bytes())
                 clipped = clip_srt(backup.read_text(encoding="utf-8-sig"), task.clip_start or 0, task.clip_end)
                 subtitle.write_text(clipped, encoding="utf-8")
-                if clipped and task.subtitle_mode == "embedded" and path.suffix == ".mkv":
-                    temporary = path.with_name(f".{path.stem}.subtitles{path.suffix}")
-                    arguments = ["-hide_banner", "-loglevel", "error", "-y", "-i", str(path), "-i", str(subtitle),
-                                 "-map", "0", "-map", "1:0", "-c", "copy", "-c:s", "srt", "-metadata:s:s:0",
-                                 f"language={task.subtitle_language}", "-progress", "pipe:1", "-nostats", str(temporary)]
-                    plans.append(PostprocessPlan(path, temporary, arguments, "embedding_subtitles"))
+                if not clipped:
+                    raise SubtitlesUnavailable("No subtitles in the selected fragment")
+            if task.subtitle_mode == "embedded" and selection_kind(task.selection) == "video":
+                if path.suffix.lower() != ".mkv":
+                    raise ValueError("Embedded subtitles require the requested MKV container")
+                temporary = path.with_name(f".{path.stem}.subtitles{path.suffix}")
+                arguments = ["-hide_banner", "-loglevel", "error", "-y", "-i", str(path), "-i", str(subtitle),
+                             "-map", "0:v?", "-map", "0:a?", "-map", "0:t?", "-map", "1:0", "-c", "copy", "-c:s", "srt",
+                             "-map_metadata", "0", "-map_chapters", "0", "-metadata:s:s:0", f"language={subtitle_tag(task.subtitle_language)}",
+                             "-progress", "pipe:1", "-nostats", str(temporary)]
+                plans.append(PostprocessPlan(path, temporary, arguments, "embedding_subtitles"))
+                plans.append(PostprocessPlan(path, None, ["-v", "error", "-select_streams", "s", "-show_entries",
+                                                          "stream=codec_type:stream_tags=language", "-of", "json", str(path)], "embedding_subtitles", "ffprobe"))
         if task.selection.startswith("mp3:") and path.suffix.lower() == ".mp3":
             # Generic extractors often omit abr. Inspect the actual MP3 rather
             # than trusting an estimate or re-encoding already suitable audio.
@@ -94,6 +110,9 @@ def cleanup_subtitle_backups(task: Task, paths: list[str]):
     for filename in paths:
         path = Path(filename)
         try:
+            if task.subtitle_language and task.subtitle_mode == "embedded" and selection_kind(task.selection) == "video":
+                # Only remove the exact task-owned SRT after successful mux/probe.
+                subtitle_path(task, path).unlink(missing_ok=True)
             for candidate in path.parent.iterdir():
                 if candidate.name.startswith("." + path.stem + ".") and candidate.name.endswith(f".{task.id[:8]}.source"):
                     candidate.unlink(missing_ok=True)

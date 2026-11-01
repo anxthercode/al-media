@@ -3,10 +3,12 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from al_media.config import Preferences
 from al_media.models import Task
+
+from .subtitles import subtitle_delay
 
 
 def common_args(tools: dict[str, Path], preferences: Preferences) -> list[str]:
@@ -16,11 +18,30 @@ def common_args(tools: dict[str, Path], preferences: Preferences) -> list[str]:
     return args
 
 
+def youtube_playlist_urls(url: str) -> tuple[str, str] | None:
+    """Separate a video from its playlist context, only on YouTube hosts."""
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if host not in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}:
+        return None
+    query = parse_qs(parsed.query)
+    video = parsed.path.strip("/") if host.endswith("youtu.be") else query.get("v", [""])[0] if parsed.path == "/watch" else ""
+    playlist = query.get("list", [""])[0]
+    if not video or not playlist:
+        return None
+    return ("https://www.youtube.com/watch?" + urlencode({"v": video}),
+            "https://www.youtube.com/playlist?" + urlencode({"list": playlist}))
+
+
 def metadata_args(url: str, tools: dict[str, Path], preferences: Preferences, playlist: bool = False) -> list[str]:
     parsed = urlsplit(url)
     query = parse_qs(parsed.query)
-    playlist = playlist or (parsed.path.rstrip("/") == "/playlist" and bool(query.get("list")))
-    return [*common_args(tools, preferences), "-J", "--flat-playlist" if playlist else "--no-playlist", "--", url]
+    playlist = playlist or (parsed.hostname in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}
+                            and parsed.path.rstrip("/") == "/playlist" and bool(query.get("list")))
+    # Flat extraction leaves single videos fully analyzed, but lists collections
+    # without resolving every child (one protected SoundCloud track used to fail
+    # the whole request). Selected entries get independent metadata jobs later.
+    return [*common_args(tools, preferences), "-J", "--flat-playlist", "--yes-playlist" if playlist else "--no-playlist", "--", url]
 
 
 def download_args(task: Task, tools: dict[str, Path], preferences: Preferences) -> list[str]:
@@ -83,9 +104,9 @@ def download_args(task: Task, tools: dict[str, Path], preferences: Preferences) 
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", task.subtitle_language):
             raise ValueError("Invalid subtitle language")
         args += ["--write-auto-subs" if task.subtitle_auto else "--write-subs", "--sub-langs", re.escape(task.subtitle_language),
-                 "--sub-format", "srt/vtt/best", "--convert-subs", "srt"]
+                 "--sub-format", "srt/vtt/best", "--convert-subs", "srt", "--sleep-subtitles", str(subtitle_delay(task))]
         if task.subtitle_mode == "embedded" and not is_audio:
             args += ["--remux-video", "mkv"]
-            if not clipping:
-                args += ["--embed-subs"]
+            # Embed once in our postprocessor, after any timestamp adjustment.
+            # Explicit --write-subs + --embed-subs would retain an unwanted SRT.
     return [*args, "--", task.url]

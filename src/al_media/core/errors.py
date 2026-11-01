@@ -12,8 +12,14 @@ def classify_engine_error(lines: Sequence[str]) -> str:
     """
     errors = [line for line in lines if "ERROR:" in line.upper()]
     text = "\n".join(errors[-3:] if errors else lines[-10:]).lower()
+    if "subtitle" in text and ("429" in text or "too many requests" in text):
+        return "error_subtitles_rate_limit"
+    if "subtitle" in text and any(term in text for term in ("unable to download", "not available", "no subtitles", "not found")):
+        return "error_subtitles_unavailable"
     if "unsupported url" in text or "no suitable extractor" in text:
         return "error_unsupported_url"
+    if "drm" in text and ("protect" in text or "encrypt" in text):
+        return "error_drm"
     if "sign in to confirm" in text and "not a bot" in text:
         return "error_youtube_verification"
     if "cookie" in text and any(term in text for term in ("could not copy", "failed to decrypt", "dpapi", "database", "netscape", "could not find")):

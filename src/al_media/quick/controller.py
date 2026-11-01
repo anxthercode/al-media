@@ -104,7 +104,7 @@ class ApplicationController(QObject):
 
     @Property(str, constant=True)
     def noticesText(self):
-        return (app_root() / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        return (app_root() / "assets" / "licenses" / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
 
     @Property("QVariantList", constant=True)
     def licenseSections(self):
@@ -281,8 +281,17 @@ class ApplicationController(QObject):
     @Slot()
     def clearCompleted(self):
         for task in list(self.scheduler.tasks.values()):
-            if task.state == State.COMPLETED and not task.hidden:
-                self.removeTask(task.id)
+            if task.state in {State.COMPLETED, State.FAILED, State.CANCELLED, State.INTERRUPTED} and not task.hidden:
+                job = self.scheduler.jobs.get(task.id)
+                if job:
+                    job.finished.connect(lambda _id, ident=task.id: self.removeTask(ident))
+                else:
+                    self.removeTask(task.id)
+
+    @Slot()
+    def cancelAll(self):
+        if not self._closing:
+            self.scheduler.cancel_all()
 
     @Slot(str, bool)
     def openResult(self, ident, folder):
@@ -290,6 +299,7 @@ class ApplicationController(QObject):
 
         task = self.scheduler.tasks.get(ident)
         if not task or not task.final_path or not Path(task.final_path).is_file():
+            self._downloads.refreshFiles()
             self._feedback = "error_final_file_missing"
             self.changed.emit()
             return
@@ -347,6 +357,7 @@ class ApplicationController(QObject):
             if self._dialog:
                 self._dialog.reject()
             self._composer.shutdown()
+            self._settings.shutdown()
             self._media.shutdown()
             self.scheduler.shutdown()
             self._shutdown_started = monotonic()
@@ -355,7 +366,7 @@ class ApplicationController(QObject):
         return False
 
     def _finish_shutdown(self):
-        if not self.scheduler.jobs and not self._composer.busy:
+        if not self.scheduler.jobs and not self._composer.busy and not self._media.busy and not self._settings.busy:
             self._shutdown_timer.stop()
             self._exit_ready = True
             if self.tray:

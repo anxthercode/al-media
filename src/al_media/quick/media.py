@@ -42,12 +42,16 @@ class IconProvider(QQuickImageProvider):
                 tinted_root = root_tag[0].replace(b"<svg ", b'<svg fill="#' + color.encode() + b'" ', 1)
                 data = data[:root_tag.start()] + tinted_root + data[root_tag.end():]
         renderer = QSvgRenderer(data)
+        # The image provider returns a square canvas. Fit the SVG's original
+        # viewBox into it instead of stretching wide/narrow brand marks.
+        renderer.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
         dimensions = requestedSize if requestedSize.width() > 0 and requestedSize.height() > 0 else QSize(24, 24)
         dimensions = dimensions.boundedTo(QSize(256, 256))
         result = QImage(dimensions, QImage.Format.Format_ARGB32_Premultiplied)
         result.fill(Qt.GlobalColor.transparent)
         if renderer.isValid():
             painter = QPainter(result)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             renderer.render(painter)
             painter.end()
         size.setWidth(dimensions.width())
@@ -90,6 +94,7 @@ class MediaViewModel(QObject):
         self.signature = None
         self.generation = 0
         self.frames = {}
+        self._decoded = self._showing_frames = False
         self.index = 0
         self.active = True
         self.timer = QTimer(self, interval=2400)
@@ -99,6 +104,7 @@ class MediaViewModel(QObject):
     def source(self):
         return self._source
 
+    @Slot(object)
     def set_task(self, task):
         signature = (task.url, task.clip_start, task.clip_end, task.duration, task.final_path, selection_kind(task.selection)) if task else None
         if task is self.task and signature == self.signature:
@@ -109,19 +115,24 @@ class MediaViewModel(QObject):
         generation = self.generation
         self.task = task
         self.frames.clear()
+        self.index = -1
+        self._decoded = self._showing_frames = False
         if not task or task.url != old_url:
             self._source = ""
         self.timer.stop()
+        self.extractor.set_enabled(False)
         self.extractor.set_task(task)
         if task:
             candidates = task.thumbnail_candidates or ([task.thumbnail] if task.thumbnail else [])
             self._poster(candidates, generation)
             if selection_kind(task.selection) == "video":
                 for index, frame in enumerate(storyboard_frames(task)):
+                    if not self._usable_size(frame.rect[2], frame.rect[3]):
+                        continue
 
                     def ready(image, index=index, frame=frame, generation=generation):
                         if generation == self.generation and not image.isNull():
-                            self._frame(index, image.copy(*frame.rect))
+                            self._frame(index, image.copy(*frame.rect), storyboard=True)
 
                     self.cache.fetch(frame.url, ready, low_priority=True)
                 self.extractor.set_enabled(self.active)
@@ -136,15 +147,31 @@ class MediaViewModel(QObject):
         def ready(image):
             if generation != self.generation:
                 return
-            if not image.isNull():
+            if not image.isNull() and not self._showing_frames:
                 self._source = self.provider.put(image)
                 self.changed.emit()
-            else:
+            elif image.isNull():
                 self._poster(candidates[1:], generation)
 
         self.cache.fetch(candidates[0], ready)
 
-    def _frame(self, index, image):
+    @staticmethod
+    def _usable_size(width, height):
+        return min(width, height) >= 360 and max(width, height) >= 640
+
+    def _frame(self, index, image, *, storyboard=False):
+        if not self.task or self.task.playlist or selection_kind(self.task.selection) != "video":
+            return
+        if image.isNull() or not self._usable_size(image.width(), image.height()) or storyboard and self._decoded:
+            return
+        if not storyboard and not self._decoded:
+            # A late sprite request must never replace a decoded video frame,
+            # nor leave lower-quality sprites interleaved with real frames.
+            self.frames.clear()
+            self._decoded = True
+        previous = self.frames.get(index)
+        if previous and previous.width() * previous.height() > image.width() * image.height():
+            return
         self.frames[index] = image
         if self.active and not self.timer.isActive():
             self.timer.start()
@@ -153,6 +180,7 @@ class MediaViewModel(QObject):
         if self.frames and self.active:
             keys = sorted(self.frames)
             self.index = (self.index + 1) % len(keys)
+            self._showing_frames = True
             self._source = self.provider.put(self.frames[keys[self.index]])
             self.changed.emit()
 
@@ -171,3 +199,7 @@ class MediaViewModel(QObject):
         self.timer.stop()
         self.extractor.shutdown()
         self.cache.shutdown()
+
+    @property
+    def busy(self):
+        return self.extractor.busy

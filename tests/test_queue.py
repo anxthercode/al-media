@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import QProcessEnvironment
 
 from al_media.config import Preferences
@@ -36,6 +37,58 @@ def test_progress_burst_is_coalesced_and_final_state_is_durable(qtbot, tmp_path,
     scheduler._completed(task.id, [str(tmp_path / "video.mkv")])
     assert db.all()[0].state == State.COMPLETED and db.all()[0].percent == 100
     db.close()
+
+
+def test_sparse_progress_preserves_rate_until_processing_then_clears_it(qapp, tmp_path):
+    db = Database(tmp_path / "sparse-progress.sqlite3")
+    scheduler = Scheduler(db, TOOLS, Preferences(folder=str(tmp_path)))
+    task = Task("https://fixture.test/video", state=State.DOWNLOADING)
+    scheduler.tasks[task.id] = task
+    try:
+        scheduler._progress(task.id, Progress("download", percent=3, speed=100_000, eta=50))
+        scheduler._progress(task.id, Progress("download", percent=5))
+        assert (task.percent, task.speed, task.eta) == (5, 100_000, 50)
+        assert task.processing_stage == "downloading"
+        scheduler._stage(task.id, "downloading")
+        assert task.state == State.DOWNLOADING and task.percent == 5
+        scheduler._progress(task.id, Progress("postprocess"))
+        assert task.state == State.POSTPROCESSING
+        assert task.percent is task.speed is task.eta is None
+        scheduler._stage(task.id, "downloading")  # Late stderr must not reverse postprocessing.
+        assert task.state == State.POSTPROCESSING
+        scheduler._failed(task.id, "cancelled")
+        assert task.state == State.CANCELLED and task.speed is task.eta is None
+    finally:
+        scheduler.shutdown()
+        db.close()
+
+
+@pytest.mark.parametrize("starting_state", [State.READY, State.PENDING_METADATA])
+def test_cancel_all_stops_running_process_without_starting_waiting_jobs(qtbot, tmp_path, monkeypatch, starting_state):
+    db = Database(tmp_path / "cancel-all.sqlite3")
+    scheduler = Scheduler(db, TOOLS, Preferences(folder=str(tmp_path), concurrency=1))
+    original_start = EngineJob.start
+    launched = []
+
+    def fake_start(job):
+        launched.append(job.task.id)
+        job.process.setArguments([str(FIXTURE), *job.process.arguments()])
+        original_start(job)
+
+    monkeypatch.setattr(EngineJob, "start", fake_start)
+    tasks = [Task(f"https://slow.test/{i}", state=starting_state, title=str(i)) for i in range(3)]
+    try:
+        for task in tasks:
+            scheduler.submit(task)
+        qtbot.waitUntil(lambda: bool(scheduler.jobs) and next(iter(scheduler.jobs.values())).process.processId() > 0, timeout=5000)
+        scheduler.cancel_all()
+        qtbot.waitUntil(lambda: not scheduler.jobs, timeout=6000)
+        assert len(launched) == 1
+        assert all(t.state == State.CANCELLED for t in scheduler.tasks.values())
+        assert not scheduler.stopping and not scheduler._cancelling_all
+    finally:
+        scheduler.shutdown()
+        db.close()
 
 
 def _job(task, mode, tmp_path):
@@ -223,3 +276,36 @@ def test_download_request_analyzes_source_before_starting(qtbot, tmp_path, monke
     assert task.state == State.DOWNLOADING
     assert modes == ["metadata", "download"]
     db.close()
+
+
+def test_protected_playlist_child_does_not_stop_other_downloads(qtbot, tmp_path, monkeypatch):
+    from al_media.application.submission import SubmissionService
+
+    db = Database(tmp_path / "playlist.sqlite3")
+    prefs = Preferences(folder=str(tmp_path), concurrency=1)
+    scheduler = Scheduler(db, TOOLS, prefs)
+    original_start = EngineJob.start
+
+    def fake_start(job):
+        environment = QProcessEnvironment.systemEnvironment()
+        environment.insert("PYTHONIOENCODING", "utf-8")
+        job.process.setProcessEnvironment(environment)
+        job.process.setArguments([str(FIXTURE), *job.process.arguments()])
+        original_start(job)
+
+    monkeypatch.setattr(EngineJob, "start", fake_start)
+    service = SubmissionService(scheduler)
+    source = Task("https://example.test/playlist", title="Playlist", playlist=True, playlist_entries=[
+        {"index": 1, "title": "Protected", "url": "https://protected.test/video"},
+        {"index": 2, "title": "Available", "url": "https://fixture.test/video"},
+    ])
+    try:
+        service.commit(service.playlist(source, [1, 2], prefs), str(tmp_path))
+        qtbot.waitUntil(lambda: not scheduler.jobs and {t.state for t in scheduler.tasks.values()} == {State.FAILED, State.COMPLETED}, timeout=10000)
+        bad, good = list(scheduler.tasks.values())
+        assert bad.error == "error_drm" and good.playlist_index == 2
+        assert Path(good.final_path).is_file()
+        assert [t.state for t in db.all()].count(State.COMPLETED) == 1
+    finally:
+        scheduler.shutdown()
+        db.close()

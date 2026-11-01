@@ -21,6 +21,9 @@ Item {
     required property bool canOpen
     required property string sourceUrl
     required property string destination
+    property bool pooled: false
+    ListView.onPooled: pooled = true
+    ListView.onReused: pooled = false
     objectName: "downloadRow-" + taskId
     height: Math.max(80, mainRow.implicitHeight + 24)
     RowLayout {
@@ -32,46 +35,52 @@ Item {
         spacing: ui.compact ? 16 : 24
         ColumnLayout {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            Layout.alignment: Qt.AlignTop
             spacing: 4
             UiText { text: row.title; font.weight: Font.DemiBold; Layout.fillWidth: true; maximumLineCount: 2; elide: Text.ElideRight }
             UiText { text: row.metadata; font.pixelSize: 12; color: Theme.muted; Layout.fillWidth: true; maximumLineCount: 2; elide: Text.ElideRight }
             UiText { text: row.error; visible: text.length > 0; color: Theme.error; font.pixelSize: 12; Layout.fillWidth: true }
         }
         Column {
-            Layout.preferredWidth: ui.compact ? 210 : 280
+            objectName: "statusColumn-" + row.taskId
+            Layout.alignment: Qt.AlignTop
+            Layout.preferredWidth: Math.min(420, row.width * 0.36)
+            Layout.minimumWidth: Math.min(420, row.width * 0.36)
+            Layout.maximumWidth: Math.min(420, row.width * 0.36)
             spacing: 5
             RowLayout {
                 width: parent.width
-                UiText { text: row.status; font.pixelSize: 12; color: row.taskState === "failed" ? Theme.error : row.taskState === "postprocessing" ? Theme.warning : Theme.muted; Layout.fillWidth: true }
+                UiText { text: row.status; font.pixelSize: 12; color: row.taskState === "failed" ? Theme.error : row.taskState === "postprocessing" || row.taskState === "completed" && !row.canOpen ? Theme.warning : Theme.muted; Layout.fillWidth: true }
                 UiText { text: Math.floor(row.progress) + "%"; visible: row.taskState === "downloading" && !row.indeterminate; font.pixelSize: 12; font.weight: Font.DemiBold }
             }
-            ProgressBar {
+            UiProgress {
+                objectName: "taskProgress-" + row.taskId
                 width: parent.width
-                height: 3
-                visible: !row.canOpen && row.taskState !== "failed" && row.taskState !== "cancelled" && row.taskState !== "interrupted"
-                from: 0; to: 100; value: row.progress
+                height: 4
+                visible: row.canCancel
+                value: row.progress
                 indeterminate: row.indeterminate
-                background: Rectangle { color: Theme.surface3; radius: 2 }
-                contentItem: Item {
-                    clip: true
-                    Rectangle {
-                        width: parent.width * (row.indeterminate ? 0.3 : row.progress / 100)
-                        height: parent.height
-                        color: row.taskState === "postprocessing" ? Theme.warning : Theme.muted
-                        x: 0
-                        SequentialAnimation on x { running: row.indeterminate && row.visible && !Theme.reducedMotion; loops: Animation.Infinite; NumberAnimation { from: -84; to: 280; duration: 1400 } }
-                    }
-                }
+                animate: !row.pooled
+                tint: row.taskState === "postprocessing" ? Theme.warning : Theme.muted
             }
-            UiText { width: parent.width; text: row.detail; color: Theme.quiet; font.pixelSize: 12; maximumLineCount: 1; elide: Text.ElideMiddle }
+            UiText { objectName: "taskDetail-" + row.taskId; width: parent.width; height: 18; text: row.detail; color: Theme.quiet; font.pixelSize: 12; maximumLineCount: 1; elide: Text.ElideMiddle }
         }
-        Row {
-            spacing: 6
-            UiButton { objectName: "cancelTask-" + row.taskId; text: ui.t("cancel"); ghost: true; compact: true; visible: row.canCancel; onClicked: ui.services.cancelTask(row.taskId) }
-            UiButton { objectName: "retryTask-" + row.taskId; text: ui.t("retry"); ghost: true; compact: true; visible: row.canRetry; onClicked: ui.services.retryTask(row.taskId) }
-            UiButton { objectName: "openResult-" + row.taskId; iconName: "play"; text: ui.t("open"); visible: row.canOpen; onClicked: ui.services.openResult(row.taskId, false) }
-            UiButton { objectName: "showFolder-" + row.taskId; width: 36; iconName: "folder"; tip: ui.t("folder"); ghost: true; compact: true; visible: row.canOpen; onClicked: ui.services.openResult(row.taskId, true) }
-            UiButton { objectName: "removeTask-" + row.taskId; width: 36; iconName: "close"; tip: ui.t("remove"); ghost: true; compact: true; visible: !row.canCancel; onClicked: ui.services.removeTask(row.taskId) }
+        Item {
+            Layout.preferredWidth: ui.jobActionsWidth
+            Layout.minimumWidth: ui.jobActionsWidth
+            Layout.maximumWidth: ui.jobActionsWidth
+            Layout.preferredHeight: 36
+            Row {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 6
+                UiButton { objectName: "cancelTask-" + row.taskId; text: ui.t("cancel"); ghost: true; compact: true; visible: row.canCancel; onClicked: ui.services.cancelTask(row.taskId) }
+                UiButton { objectName: "retryTask-" + row.taskId; text: ui.t("retry"); ghost: true; compact: true; visible: row.canRetry; onClicked: ui.services.retryTask(row.taskId) }
+                UiButton { objectName: "openResult-" + row.taskId; iconName: "play"; text: ui.t("open"); visible: row.canOpen; onClicked: ui.services.openResult(row.taskId, false) }
+                UiButton { objectName: "showFolder-" + row.taskId; width: 36; iconName: "folderOpen"; tip: ui.t("folder"); ghost: true; compact: true; visible: row.canOpen; onClicked: ui.services.openResult(row.taskId, true) }
+                UiButton { objectName: "removeTask-" + row.taskId; width: 36; iconName: "close"; tip: ui.t("remove"); ghost: true; compact: true; visible: !row.canCancel; onClicked: ui.services.removeTask(row.taskId) }
+            }
         }
     }
     UiRule { width: parent.width; anchors.bottom: parent.bottom }

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from time import monotonic
 
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -43,7 +44,12 @@ def main():
         QTest.qWait(300)
         assert window.grabWindow().save(str(destination / name))
 
-    capture("downloads.png")
+    # A failed URL refresh must not replace an existing working screenshot
+    # with an empty state. Keep diagnostic captures outside public docs.
+    if args.url:
+        capture("empty.png", args.diagnostics)
+    else:
+        capture("downloads.png")
     composer = controller.composer
     result = {"url": args.url, "phase": "empty", "errors": []}
     if args.url:
@@ -63,7 +69,10 @@ def main():
                 QTest.qWait(100)
             result["title"] = composer.task.title
             result["preview"] = bool(controller.media.source)
-            capture("downloads.png")
+            if result["preview"]:
+                capture("downloads.png")
+            else:
+                capture("source-no-preview.png", args.diagnostics)
         else:
             capture("source-error.png", args.diagnostics)
 
@@ -78,7 +87,10 @@ def main():
     while not controller._exit_ready and monotonic() < deadline:
         QTest.qWait(100)
     assert controller._exit_ready, "Background jobs did not stop"
+    window.hide()
     presentation.dispose()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
     db.close()
 
 

@@ -34,9 +34,7 @@ try {
         if (-not (Test-Path (Join-Path $tree "tools\$name"))) { throw "Package missing $name" }
     }
     Copy-Item -LiteralPath (Join-Path $root 'packaging\README.txt') -Destination (Join-Path $tree 'README.txt') -Force
-    foreach ($notice in @('LICENSE', 'THIRD_PARTY_NOTICES.md')) {
-        Copy-Item -LiteralPath (Join-Path $root $notice) -Destination (Join-Path $tree $notice) -Force
-    }
+    Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination (Join-Path $tree 'LICENSE') -Force
     $zip = Join-Path $root "dist\ALMedia-$version-portable-win-x64.zip"
     if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
     Compress-Archive -LiteralPath $tree -DestinationPath $zip

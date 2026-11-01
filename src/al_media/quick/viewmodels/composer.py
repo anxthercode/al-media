@@ -3,15 +3,17 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import replace
 
-from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
+from PySide6.QtCore import Property, QObject, QRunnable, QSettings, Qt, QThreadPool, QTimer, Signal, Slot
 
 from al_media.application.submission import SubmissionService
-from al_media.config import Preferences
+from al_media.config import Preferences, settings_store
+from al_media.core.commands import youtube_playlist_urls
 from al_media.core.engine import EngineJob
 from al_media.core.metadata import available_selections, estimate_size, parse_urls, populate_task, preferred_selection, selection_kind, source_choices, task_selections, video_heights
 from al_media.core.naming import canonical_url
 from al_media.core.options import apply_options, format_time
 from al_media.core.source_probe import SourceProbe
+from al_media.core.subtitles import subtitle_choices
 from al_media.models import State, Task
 
 from ..localization import text
@@ -40,11 +42,33 @@ def compatible_choices(task: Task, mode: str, audio_format: str = "mp3") -> list
     return [key for key in source_choices(task, mode, audio_format) if key in available]
 
 
+class _SelectionSave(QRunnable):
+    def __init__(self, values, finished):
+        super().__init__()
+        self.values, self.finished = values, finished
+
+    def run(self):
+        error = ""
+        try:
+            # Own QSettings instance in the worker; only selection keys are
+            # written, so delayed saves cannot overwrite unrelated settings.
+            settings = settings_store()
+            for key, value in self.values.items():
+                settings.setValue(key, value)
+            settings.sync()
+            if settings.status() != QSettings.Status.NoError:
+                raise OSError("Selection settings could not be saved")
+        except OSError:
+            error = "settings_error"
+        self.finished.emit(error)
+
+
 class ComposerViewModel(QObject):
     changed = Signal()
     source_changed = Signal(object)
     enqueue_requested = Signal(object)
     preferences_updated = Signal()
+    _selection_save_finished = Signal(str)
 
     def __init__(self, scheduler, preferences: Preferences, parent=None, *, persist=True, job_factory=EngineJob):
         super().__init__(parent)
@@ -53,6 +77,7 @@ class ComposerViewModel(QObject):
         self.submissions = SubmissionService(scheduler)
         self.task: Task | None = None
         self._url, self._phase, self._error = "", "empty", ""
+        self._playlist_mode = None
         self._mode = preferences.media_mode
         self._audio_format = preferences.audio_format
         self._range_open = self._clip = False
@@ -64,6 +89,11 @@ class ComposerViewModel(QObject):
         self._generation = 0
         self._drafts: OrderedDict[str, dict] = OrderedDict()
         self._closing = False
+        self._saving = False
+        self._pending_save = {}
+        self._save_timer = QTimer(self, singleShot=True, interval=200)
+        self._save_timer.timeout.connect(self._save_selection)
+        self._selection_save_finished.connect(self._saved_selection, Qt.ConnectionType.QueuedConnection)
         self.timer = QTimer(self, singleShot=True, interval=450)
         self.timer.timeout.connect(self.analyze)
         self.probe = SourceProbe(scheduler.tools.get("ffprobe"), self)
@@ -73,7 +103,12 @@ class ComposerViewModel(QObject):
         if not self.task:
             return
         key = canonical_url(self.task.url)
-        self._drafts[key] = {"task": self.task.to_dict(), "clip": self._clip, "start": self._start, "end": self._end, "applied": self._applied, "mode": self._mode, "audio": self._audio_format}
+        # Drafts need editable options, not a deep copy of every stream,
+        # thumbnail fragment and subtitle URL on each mode/bitrate click.
+        options = {field: getattr(self.task, field) for field in
+                   ("url", "selection", "clip_start", "clip_end", "audio_language", "subtitle_language", "subtitle_auto", "subtitle_mode")}
+        options["audio_track_ids"] = list(self.task.audio_track_ids)
+        self._drafts[key] = {"task": options, "clip": self._clip, "start": self._start, "end": self._end, "applied": self._applied, "mode": self._mode, "audio": self._audio_format}
         self._drafts.move_to_end(key)
         while len(self._drafts) > 16:
             self._drafts.popitem(last=False)
@@ -103,8 +138,9 @@ class ComposerViewModel(QObject):
         tracks = [{"value": "", "label": text(lang, "automatic")}]
         if task:
             tracks += [{"value": str(index), "label": item["label"] or text(lang, "source_audio")} for index, item in enumerate(task.audio_tracks)]
-            for auto, supplied in ((False, task.subtitles), (True, task.automatic_captions)):
-                subtitle_options += [{"value": f"{int(auto)}:{key}", "label": key + (" · " + text(lang, "auto_captions") if auto else "")} for key in sorted(supplied) if key != "live_chat"]
+            if self._mode == "video":
+                subtitle_options += [{"value": f"{int(auto)}:{code}", "label": text(lang, "subtitle_" + language) + (" · " + text(lang, "auto_captions") if auto else "")}
+                                     for code, auto, language in subtitle_choices(task)]
         from al_media.core.metadata import expected_container
 
         container = expected_container(task) or text(lang, "source_audio") if task else ""
@@ -112,14 +148,15 @@ class ComposerViewModel(QObject):
         audio_formats = (
             ([{"value": "mp3", "label": "MP3"}] if "mp3:320" in keys else []) + ([{"value": "audio", "label": text(lang, "source_audio")}] if "audio" in keys else []) + ([{"value": "m4a", "label": "M4A"}] if "m4a" in keys else [])
         )
+        estimated = estimate_size(task) if task else None
         return {
             "url": self._url,
             "phase": self._phase,
             "error": self._error,
             "title": task.title if task else "",
             "author": task.author if task else "",
-            "source": task.source if task else "",
-            "duration": duration_label(task.duration) if task else "",
+            "source": ("YouTube" if "youtube" in task.source.casefold() else "SoundCloud" if "soundcloud" in task.source.casefold() else task.source) if task else "",
+            "duration": (text(lang, "playlist_items") + f": {len(task.playlist_entries)}" if task.playlist else duration_label(task.duration)) if task else "",
             "durationHint": format_time(task.duration) if task else "",
             "thumbnail": task.thumbnail if task else "",
             "mode": self._mode,
@@ -135,9 +172,9 @@ class ComposerViewModel(QObject):
             "rangeError": self._range_error,
             "hasRange": bool(task and (task.clip_start is not None or task.clip_end is not None)),
             "rangeLabel": f"{duration_label(task.clip_start or 0)}–{duration_label(task.clip_end or task.duration)}" if task else "",
-            "estimated": size_label(estimate_size(task), lang) if task else "—",
+            "estimated": size_label(estimated, lang) if estimated else "",
             "container": container,
-            "canDownload": self._phase in {"ready", "batch"} and not dirty and not self._range_error,
+            "canDownload": self._phase in {"ready", "batch"} and not dirty and not self._range_error and (not task or not task.playlist or any(e["url"] for e in task.playlist_entries)),
             "isPlaylist": bool(task and task.playlist),
             "playlistEntries": task.playlist_entries if task else [],
             "tracks": tracks,
@@ -145,7 +182,7 @@ class ComposerViewModel(QObject):
             "hasExtra": len(tracks) > 2 or len(subtitle_options) > 1,
             "track": self._track_key(),
             "subtitle": f"{int(task.subtitle_auto)}:{task.subtitle_language}" if task and task.subtitle_language else "",
-            "subtitleMode": task.subtitle_mode if task and task.subtitle_mode != "none" else "sidecar",
+            "subtitleMode": "embedded" if task and task.subtitle_language and self._mode == "video" else "none",
             "videoAvailable": bool(task and compatible_choices(task, "video")),
             "audioAvailable": bool(task and compatible_choices(task, "audio")),
         }
@@ -157,6 +194,15 @@ class ComposerViewModel(QObject):
                     return str(index)
         return ""
 
+    def _normalize_subtitles(self):
+        if not self.task:
+            return
+        language = self.task.subtitle_language.replace("_", "-").split("-")[0].lower()
+        choice = next((item for item in subtitle_choices(self.task) if item[2] == language), None) if self._mode == "video" else None
+        self.task.subtitle_language = choice[0] if choice else ""
+        self.task.subtitle_auto = choice[1] if choice else False
+        self.task.subtitle_mode = "embedded" if choice else "none"
+
     @Slot(str)
     def setUrl(self, value):
         if value == self._url:
@@ -164,6 +210,7 @@ class ComposerViewModel(QObject):
         self._remember()
         self._cancel()
         self._url = value
+        self._playlist_mode = None
         self.task = None
         self._error = self._range_error = ""
         self._range_open = self._clip = False
@@ -173,6 +220,8 @@ class ComposerViewModel(QObject):
         self._phase = "batch" if len(valid) > 1 and not invalid else "loading" if len(valid) == 1 and not invalid else "empty"
         if invalid and value:
             self._error = "invalid_links"
+        if self._phase == "loading" and youtube_playlist_urls(valid[0]):
+            self._phase = "choice"
         self.changed.emit()
         self.source_changed.emit(None)
         if self._phase == "loading":
@@ -190,9 +239,14 @@ class ComposerViewModel(QObject):
         valid, invalid = parse_urls(self._url)
         if self._closing or invalid or len(valid) != 1:
             return
+        context = youtube_playlist_urls(valid[0])
+        if context and self._playlist_mode is None:
+            self._phase = "choice"
+            self.changed.emit()
+            return
         self._cancel()
         generation = self._generation
-        task = Task(valid[0], folder=self.preferences.folder)
+        task = Task(context[int(self._playlist_mode)] if context else valid[0], folder=self.preferences.folder, playlist=bool(context and self._playlist_mode))
         self._phase, self._error = "loading", ""
         self.changed.emit()
         try:
@@ -206,6 +260,13 @@ class ComposerViewModel(QObject):
         job.failed.connect(lambda _id, error: self._fail(error) if generation == self._generation and error != "cancelled" else None)
         job.finished.connect(lambda _id: self._finished(job))
         job.start()
+
+    @Slot(bool)
+    def choosePlaylist(self, playlist):
+        if self._phase != "choice":
+            return
+        self._playlist_mode = playlist
+        self.analyze()
 
     def _ready(self, generation, task, info):
         if self._closing or generation != self._generation:
@@ -239,6 +300,7 @@ class ComposerViewModel(QObject):
         if self._mode == "audio":
             self._audio_format = "mp3" if task.selection.startswith("mp3:") else task.selection
         self.task = task
+        self._normalize_subtitles()
         self._phase, self._error = "ready", ""
         self.changed.emit()
         self.source_changed.emit(task)
@@ -286,8 +348,7 @@ class ComposerViewModel(QObject):
             return
         self.task.selection = selection
         self._mode = "video" if selection_kind(selection) == "video" else "audio"
-        if self._mode == "audio" and self.task.subtitle_mode == "embedded":
-            self.task.subtitle_mode = "sidecar"
+        self._normalize_subtitles()
         self.preferences.media_mode = self._mode
         if self._mode == "video":
             self.preferences.video_quality = selection
@@ -297,14 +358,30 @@ class ComposerViewModel(QObject):
             if selection.startswith("mp3:"):
                 self.preferences.mp3_bitrate = int(selection.split(":")[1])
         if self.persist:
-            try:
-                self.preferences.save()
-            except OSError:
-                self._error = "settings_error"
+            self._pending_save = {key: getattr(self.preferences, key) for key in ("media_mode", "video_quality", "audio_format", "mp3_bitrate")}
+            self._save_timer.start()
         self._remember()
         self.changed.emit()
         self.preferences_updated.emit()
         self.source_changed.emit(self.task)
+
+    def _save_selection(self):
+        if self._saving or not self._pending_save:
+            return
+        values, self._pending_save = self._pending_save, {}
+        self._saving = True
+        QThreadPool.globalInstance().start(_SelectionSave(values, self._selection_save_finished))
+
+    def _saved_selection(self, error):
+        self._saving = False
+        if error and not self._closing:
+            self._error = error
+            self.changed.emit()
+        elif not error and self._error == "settings_error":
+            self._error = ""
+            self.changed.emit()
+        if self._pending_save:
+            self._save_selection()
 
     @Slot()
     def toggleRange(self):
@@ -378,12 +455,12 @@ class ComposerViewModel(QObject):
             track = self.task.audio_tracks[int(value)] if value.isdigit() and int(value) < len(self.task.audio_tracks) else {}
             self.task.audio_language, self.task.audio_track_ids = track.get("language", ""), list(track.get("ids", []))
         elif key == "subtitle":
+            if self._mode != "video" or value not in {item["value"] for item in self.state["subtitles"]}:
+                return
             parts = value.split(":", 1)
             self.task.subtitle_auto = bool(len(parts) == 2 and parts[0] == "1")
             self.task.subtitle_language = parts[1] if len(parts) == 2 else ""
-            self.task.subtitle_mode = "sidecar" if value else "none"
-        elif key == "subtitleMode" and value in {"sidecar", "embedded"}:
-            self.task.subtitle_mode = value if self._mode == "video" else "sidecar"
+            self.task.subtitle_mode = "embedded" if value else "none"
         if self.task.selection == "m4a" and "m4a" not in {key for key, _ in task_selections(self.task)}:
             self.task.selection = "audio"
             self._audio_format = "audio"
@@ -426,6 +503,7 @@ class ComposerViewModel(QObject):
         self.task = self.submissions.prepare(task, self.preferences)
         self._url, self._phase, self._error = task.url, "ready", ""
         self._mode = "video" if selection_kind(task.selection) == "video" else "audio"
+        self._normalize_subtitles()
         self._clip = task.clip_start is not None or task.clip_end is not None
         self._start, self._end = format_time(task.clip_start), format_time(task.clip_end)
         self._applied = (self._clip, self._start, self._end)
@@ -435,13 +513,15 @@ class ComposerViewModel(QObject):
 
     def shutdown(self):
         self._closing = True
+        self._save_timer.stop()
+        self._save_selection()
         self._cancel()
         for job in list(self._jobs):
             job.cancel()
 
     @property
     def busy(self):
-        return bool(self._jobs) or self.probe.process is not None
+        return bool(self._jobs) or self.probe.busy or self._saving or bool(self._pending_save)
 
     def force_stop(self):
         for job in list(self._jobs):

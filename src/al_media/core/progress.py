@@ -35,6 +35,8 @@ def parse_progress(line: str) -> Progress | None:
     percent = _number(fields[6])
     if percent is None and downloaded is not None and total:
         percent = downloaded / total * 100
+    if percent is not None:
+        percent = max(0, min(100, percent))
     return Progress(fields[0], int(downloaded) if downloaded is not None else None,
                     int(total) if total is not None else None, speed, eta, percent)
 

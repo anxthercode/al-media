@@ -4,9 +4,10 @@ import json
 import math
 import re
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 
 from .metadata import estimate_size
+from .process_runner import ProcessRunner
 
 
 def positive_number(value):
@@ -63,6 +64,7 @@ class SourceProbe(QObject):
         super().__init__(parent)
         self.executable = executable
         self.process = self.task = self.stream = None
+        self.runners = set()
         self.pending = []
         self.output = bytearray()
         self.timeout = QTimer(self)
@@ -83,41 +85,41 @@ class SourceProbe(QObject):
         self.task = None
         self.pending = []
         if process:
-            process.kill()
+            process.cancel()
 
     def _next(self):
         if not self.pending or not self.task:
             return
         self.stream = self.pending.pop(0)
         self.output.clear()
-        process = QProcess(self)
+        process = ProcessRunner([str(self.executable), *probe_arguments(self.stream)], "out", self, discard_stderr=True)
         self.process = process
-        process.setProgram(str(self.executable))
-        process.setArguments(probe_arguments(self.stream))
-        process.readyReadStandardOutput.connect(lambda: self._read(process))
-        process.readyReadStandardError.connect(lambda: process.readAllStandardError())
-        process.finished.connect(lambda code, _status: self._finished(process, code))
-        process.errorOccurred.connect(lambda error: self._finished(process, -1) if error == QProcess.ProcessError.FailedToStart else None)
+        self.runners.add(process)
+        process.output.connect(self._read, Qt.ConnectionType.QueuedConnection)
+        process.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
         self.timeout.start(10000)
         process.start()
 
-    def _read(self, process):
-        data = bytes(process.readAllStandardOutput())
+    @Slot(str, bytes)
+    def _read(self, _channel, data):
+        process = self.sender()
         if process is self.process:
             self.output.extend(data)
             if len(self.output) > 128000:
-                process.kill()
+                process.cancel()
 
     def _timed_out(self):
         if self.process:
-            self.process.kill()
+            self.process.cancel()
 
-    def _finished(self, process, code):
+    @Slot(int)
+    def _finished(self, code):
+        process = self.sender()
+        self.runners.discard(process)
         if process is not self.process:
             process.deleteLater()
             return
         self.timeout.stop()
-        self._read(process)
         self.process = None
         if code == 0:
             try:
@@ -132,7 +134,8 @@ class SourceProbe(QObject):
             self._next()
 
     def shutdown(self):
-        process = self.process
         self.cancel()
-        if process:
-            process.waitForFinished(1000)
+
+    @property
+    def busy(self):
+        return bool(self.runners)

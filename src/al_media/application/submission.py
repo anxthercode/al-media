@@ -36,7 +36,8 @@ class SubmissionService:
         for entry in source.playlist_entries:
             if entry["index"] not in indices or not entry["url"]:
                 continue
-            task = Task(entry["url"], title=entry["title"], playlist_title=source.title, playlist_index=entry["index"], selection=preferred_selection(source, preferences), folder=preferences.folder, preferences_snapshot=asdict(preferences))
+            task = Task(entry["url"], title=entry["title"], playlist_title=source.title, playlist_index=entry["index"],
+                        selection=preferred_selection(source, preferences, source.selection), folder=preferences.folder, preferences_snapshot=asdict(preferences))
             result.append(task)
         return result
 

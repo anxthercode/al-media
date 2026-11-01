@@ -16,4 +16,4 @@ https://github.com/anxthercode/al-media
 https://github.com/anxthercode/al-media/issues
 
 Лицензия приложения: LICENSE.
-Сторонние компоненты: THIRD_PARTY_NOTICES.md и tools/licenses.
+Сторонние компоненты: assets/licenses/THIRD_PARTY_NOTICES.txt и tools/licenses.

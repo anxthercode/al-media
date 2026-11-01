@@ -5,9 +5,11 @@ import re
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+
+from .process_runner import ProcessRunner
 
 
 def preview_source(task):
@@ -50,6 +52,7 @@ class FrameExtractor(QObject):
         self.network = QNetworkAccessManager(self)
         self.source = self.key = None
         self.process = self.reply = None
+        self.runners = set()
         self.frames = OrderedDict()
         self.bytes = 0
         self.index = self.failures = 0
@@ -59,11 +62,15 @@ class FrameExtractor(QObject):
         self.timeout = QTimer(self)
         self.timeout.setSingleShot(True)
         self.timeout.timeout.connect(self._timeout)
+        self.next_frame = QTimer(self, singleShot=True)
+        self.next_frame.timeout.connect(self._pump)
 
     def set_task(self, task):
         source = preview_source(task)
         key = (task.url, task.clip_start, task.clip_end, source[0] if source and not source[0].startswith(("https://", "http://")) else "") if task else None
         if key == self.key and source == self.source:
+            for index, image in self.frames.get(key, {}).items():
+                self.ready.emit(index, image)
             return
         self._stop()
         self.source, self.key = source, key
@@ -108,15 +115,14 @@ class FrameExtractor(QObject):
                       "-map", "0:v:0", "-an", "-sn", "-dn", "-frames:v", "1", "-filter_threads", "1",
                       "-vf", "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease",
                       "-threads", "1", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "2", "pipe:1"]
-        process = QProcess(self)
+        # Starting FFmpeg itself can take time on Windows. Keep launch and pipe
+        # reads off the GUI thread, including the first preview after a paste.
+        process = ProcessRunner([self.ffmpeg, *arguments], "out", self, discard_stderr=True)
         self.process = process
+        self.runners.add(process)
         self.buffer.clear()
-        process.setProgram(self.ffmpeg)
-        process.setArguments(arguments)
-        process.readyReadStandardOutput.connect(lambda: self._read(process))
-        process.readyReadStandardError.connect(lambda: process.readAllStandardError())
-        process.finished.connect(lambda code, _status: self._finished(process, code))
-        process.errorOccurred.connect(lambda error: self._finished(process, -1) if error == QProcess.ProcessError.FailedToStart else None)
+        process.output.connect(self._read, Qt.ConnectionType.QueuedConnection)
+        process.finished.connect(self._finished, Qt.ConnectionType.QueuedConnection)
         self.timeout.start(10000)
         process.start()
 
@@ -143,21 +149,24 @@ class FrameExtractor(QObject):
             self.seekable = (reply.error() == reply.NetworkError.NoError
                              and reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute) == 206
                              and bool(re.fullmatch(rb"bytes 0-0/[1-9][0-9]*", bytes(reply.rawHeader("Content-Range")))))
-            QTimer.singleShot(0, self._pump)
+            self.next_frame.start(0)
         reply.deleteLater()
 
-    def _read(self, process):
-        data = bytes(process.readAllStandardOutput())
+    @Slot(str, bytes)
+    def _read(self, _channel, data):
+        process = self.sender()
         if process is self.process:
             self.buffer.extend(data)
             if len(self.buffer) > 4_000_000:
                 self.buffer.clear()
-                process.kill()
+                process.cancel()
 
-    def _finished(self, process, code):
+    @Slot(int)
+    def _finished(self, code):
+        process = self.sender()
+        self.runners.discard(process)
         if process is self.process:
             self.timeout.stop()
-            self._read(process)
             self.process = None
             image = QPixmap()
             if code == 0 and self.buffer:
@@ -176,27 +185,31 @@ class FrameExtractor(QObject):
                 self.ready.emit(index, image)
             else:
                 self.failures += 1
-            QTimer.singleShot(100, self._pump)
+            if self.enabled:
+                self.next_frame.start(100)
         process.deleteLater()
 
     def _timeout(self):
         if self.reply:
             self.reply.abort()
         if self.process:
-            self.process.kill()
+            self.process.cancel()
 
-    def _stop(self, wait=False):
+    def _stop(self):
         self.timeout.stop()
+        self.next_frame.stop()
         reply, self.reply = self.reply, None
         if reply:
             reply.abort()
         process, self.process = self.process, None
         if process:
-            process.kill()
-            if wait:
-                process.waitForFinished(500)
+            process.cancel()
         self.buffer.clear()
 
     def shutdown(self):
         self.enabled = False
-        self._stop(wait=True)
+        self._stop()
+
+    @property
+    def busy(self):
+        return bool(self.runners)

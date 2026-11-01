@@ -12,6 +12,29 @@ from al_media.models import State, Task
 TOOLS = {name: Path("C:/Tools") / (name + ".exe") for name in ("yt-dlp", "ffmpeg", "deno")}
 
 
+def test_flat_playlist_keeps_unavailable_positions_and_readable_soundcloud_titles():
+    task = Task("https://soundcloud.com/author/sets/album")
+    populate_task(task, {"_type": "playlist", "title": "Album", "extractor_key": "SoundcloudSet", "entries": [
+        {"id": "123", "url": "https://soundcloud.com/artist/dark-red"}, None,
+        {"title": "Private", "url": "https://example.test/private", "availability": "private"},
+        {"title": "Protected", "url": "https://example.test/drm", "has_drm": True},
+        {"title": "[Deleted video]", "url": "https://youtube.com/watch?v=deleted"},
+        {"title": "Unlisted", "url": "https://example.test/unlisted", "availability": "unlisted"},
+    ]})
+    assert task.playlist and task.playlist_count == 6
+    assert task.playlist_entries[0]["title"] == "dark red"
+    assert [e["index"] for e in task.playlist_entries if e["url"]] == [1, 6]
+    assert all(e["unavailable"] for e in task.playlist_entries[1:5])
+    assert preferred_selection(task, Preferences()) == "mp3:320"
+    assert "best" not in dict(task_selections(task))
+
+
+def test_empty_playlist_is_not_misreported_as_a_single_video():
+    task = Task("https://youtube.com/playlist?list=empty")
+    populate_task(task, {"_type": "playlist", "entries": []})
+    assert task.playlist and not task.playlist_entries
+
+
 def test_invalid_port_is_rejected_before_queueing():
     urls = ["https://example.test:invalid/video", "https://example.test:99999/video"]
     assert parse_urls("\n".join(urls)) == ([], urls)

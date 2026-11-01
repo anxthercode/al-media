@@ -14,9 +14,10 @@ from al_media.models import Task
 from .commands import download_args, metadata_args
 from .errors import classify_engine_error
 from .naming import publish_files
-from .postprocess import cleanup_subtitle_backups, mp3_encoding_plan, postprocess_plans
+from .postprocess import SubtitlesUnavailable, cleanup_subtitle_backups, mp3_encoding_plan, postprocess_plans
 from .process_runner import ProcessRunner
 from .progress import LineBuffer, parse_progress
+from .subtitles import subtitle_tag
 
 
 class EngineJob(QObject):
@@ -139,6 +140,10 @@ class EngineJob(QObject):
             else:
                 self.errors.append(line)
             return
+        if line.startswith(("[download] Destination:", "[ffmpeg] Destination:")):
+            self.stage_changed.emit(self.task.id, "downloading")
+        elif line.startswith(("[info] Writing video subtitles to:", "[subtitles]")):
+            self.stage_changed.emit(self.task.id, "preparing_subtitles")
         for prefix, stage in (("[Merger]", "merging"), ("[ExtractAudio]", "converting"), ("[EmbedThumbnail]", "tagging"),
                               ("[Metadata]", "tagging"), ("[EmbedSubtitle]", "embedding_subtitles")):
             if line.startswith(prefix):
@@ -216,6 +221,11 @@ class EngineJob(QObject):
                 self.final_paths = valid
                 try:
                     self.post_plans = postprocess_plans(self.task, valid)
+                except SubtitlesUnavailable:
+                    self._done = True
+                    self.failed.emit(self.task.id, "error_subtitles_unavailable")
+                    self.finished.emit(self.task.id)
+                    return
                 except (OSError, ValueError):
                     self._done = True
                     self.failed.emit(self.task.id, "error_ffmpeg")
@@ -257,7 +267,7 @@ class EngineJob(QObject):
         self.errors.clear()
         self.post_stdout.clear()
         self.buffers = {"out": LineBuffer(), "err": LineBuffer()}
-        self.stage_changed.emit(self.task.id, self.current_plan.stage)
+        self.stage_changed.emit(self.task.id, "verifying" if self.current_plan.program == "ffprobe" else self.current_plan.stage)
         executable = self.tools.get(self.current_plan.program, self.tools["ffmpeg"].with_name(self.current_plan.program + ".exe"))
         self.post_runner = ProcessRunner([str(executable), *self.current_plan.arguments],
                                          "out" if self.current_plan.program == "ffprobe" else "err", self)
@@ -292,6 +302,11 @@ class EngineJob(QObject):
         if plan.program == "ffprobe" and not self.cancelled and not code:
             try:
                 streams = json.loads("\n".join(self.post_stdout)).get("streams", [])
+                if plan.stage == "embedding_subtitles":
+                    if not any(stream.get("codec_type") == "subtitle" and stream.get("tags", {}).get("language") == subtitle_tag(self.task.subtitle_language) for stream in streams):
+                        raise ValueError("Requested subtitles were not embedded")
+                    QTimer.singleShot(0, self._start_postprocess)
+                    return
                 if not self.task.selection.startswith("mp3:"):
                     if not streams or streams[0].get("codec_type") != "video" or not (streams[0].get("width", 0) > 0 and streams[0].get("height", 0) > 0):
                         raise ValueError("Clipped output has no video stream")

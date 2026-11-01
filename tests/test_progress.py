@@ -13,3 +13,8 @@ def test_channel_buffers_do_not_mix():
     assert out.feed("ALM_PRO") == []
     assert err.feed("ERROR: bad\n") == ["ERROR: bad"]
     assert out.feed("GRESS:postprocess|NA|NA|NA|NA|NA|NA\n") == ["ALM_PROGRESS:postprocess|NA|NA|NA|NA|NA|NA"]
+
+
+def test_engine_percentage_is_bounded_even_when_estimates_change():
+    assert parse_progress("ALM_PROGRESS:download|120|100|NA|NA|NA|NA").percent == 100
+    assert parse_progress("ALM_PROGRESS:download|NA|NA|NA|NA|NA|-2%").percent == 0

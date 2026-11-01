@@ -25,7 +25,7 @@ version_resource.write_text(str(VSVersionInfo(
         VarFileInfo([VarStruct("Translation", [1033, 1200])])])), encoding="utf-8")
 tools = project / "tools"
 datas = [(str(tools / name), "tools") for name in ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe")]
-datas += [(str(project / "THIRD_PARTY_NOTICES.md"), ".")]
+datas += [(str(project / "assets/licenses/THIRD_PARTY_NOTICES.txt"), "assets/licenses")]
 datas += [(str(project / "LICENSE"), "."), (str(tools / "dependencies.json"), "tools")]
 asset_names = ("app.ico", "app.png")
 datas += [(str(project / "assets" / name), "assets") for name in asset_names]

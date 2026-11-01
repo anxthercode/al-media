@@ -133,11 +133,17 @@ def populate_task(task: Task, info: dict) -> None:
     if isinstance(entries, list):
         for index, entry in enumerate(entries, 1):
             if not isinstance(entry, dict):
-                continue
+                entry = {}
             url = entry.get("webpage_url") or entry.get("url")
-            task.playlist_entries.append({"index": index, "title": str(entry.get("title") or entry.get("id") or index),
-                                          "url": url if isinstance(url, str) and url.startswith(("http://", "https://")) else ""})
-    task.playlist = info.get("_type") in {"playlist", "multi_video"} and bool(task.playlist_entries)
+            url = url if isinstance(url, str) and url.startswith(("http://", "https://")) else ""
+            unavailable = (entry.get("has_drm") is True or entry.get("availability") in
+                           {"private", "premium_only", "subscriber_only", "needs_auth", "unavailable"}
+                           or entry.get("title") in {"[Private video]", "[Deleted video]"} or not url)
+            # Some flat SoundCloud results omit titles but keep readable slugs.
+            fallback = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1].replace("-", " ") if url else ""
+            task.playlist_entries.append({"index": index, "title": str(entry.get("title") or fallback or entry.get("id") or index),
+                                          "url": "" if unavailable else url, "unavailable": unavailable})
+    task.playlist = info.get("_type") in {"playlist", "multi_video"}
     task.playlist_count = len(task.playlist_entries) or None
     task.playlist_first_url = task.playlist_entries[0]["url"] if task.playlist_entries else ""
     task.estimated_size = estimate_size(task)
@@ -148,6 +154,9 @@ def video_heights(task: Task) -> list[int]:
 
 
 def task_selections(task: Task) -> list[tuple[str, str]]:
+    if task.playlist:
+        choices = [] if "soundcloud" in task.source.casefold() else [("best", "Best available video")]
+        return choices + [("audio", "Best source audio")] + [(f"mp3:{rate}", f"MP3 encode {rate} kbps") for rate in (128, 192, 320)]
     if not task.audio_track_ids and not task.audio_language:
         return available_selections({"formats": task.formats})
     formats = []
@@ -161,7 +170,7 @@ def task_selections(task: Task) -> list[tuple[str, str]]:
 
 
 def source_choices(task: Task, mode: str, audio_format: str = "mp3") -> list[str]:
-    choices = [key for key, _ in available_selections({"formats": task.formats})]
+    choices = [key for key, _ in task_selections(task)]
     if mode == "video":
         return [key for key in choices if selection_kind(key) == "video" and key != "mp4"
                 and key != f"video:{max(video_heights(task), default=0)}"]
@@ -171,7 +180,7 @@ def source_choices(task: Task, mode: str, audio_format: str = "mp3") -> list[str
 
 
 def preferred_selection(task: Task, preferences, wanted: str | None = None) -> str:
-    keys = [key for key, _ in available_selections({"formats": task.formats})]
+    keys = [key for key, _ in task_selections(task)]
     audio_wanted = f"mp3:{preferences.mp3_bitrate}" if preferences.audio_format == "mp3" else preferences.audio_format
     wanted = wanted or (preferences.video_quality if preferences.media_mode == "video" else audio_wanted)
     if wanted in keys:

@@ -6,6 +6,10 @@ QtObject {
     property bool reducedMotion: false
     property string fontFamily: "Segoe UI"
     readonly property int motion: reducedMotion ? 0 : 140
+    readonly property int spaceSmall: 8
+    readonly property int spaceMedium: 16
+    readonly property int spaceLarge: 24
+    readonly property int sectionSpace: 32
     readonly property color bg: light ? "#f8f8fb" : "#0c0c0e"
     readonly property color surface: light ? "#ffffff" : "#111114"
     readonly property color surface2: light ? "#f1f1f7" : "#17171b"
