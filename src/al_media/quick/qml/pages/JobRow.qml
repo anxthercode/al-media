@@ -21,6 +21,8 @@ Item {
     required property bool canOpen
     required property string sourceUrl
     required property string destination
+    property real contentInset: 0
+    readonly property real availableWidth: width - contentInset * 2
     property bool pooled: false
     ListView.onPooled: pooled = true
     ListView.onReused: pooled = false
@@ -28,8 +30,11 @@ Item {
     height: Math.max(80, mainRow.implicitHeight + 24)
     RowLayout {
         id: mainRow
+        objectName: "downloadRowContent-" + row.taskId
         anchors.left: parent.left
         anchors.right: parent.right
+        anchors.leftMargin: row.contentInset
+        anchors.rightMargin: row.contentInset
         anchors.top: parent.top
         anchors.topMargin: 12
         spacing: ui.compact ? 16 : 24
@@ -45,9 +50,9 @@ Item {
         Column {
             objectName: "statusColumn-" + row.taskId
             Layout.alignment: Qt.AlignTop
-            Layout.preferredWidth: Math.min(420, row.width * 0.36)
-            Layout.minimumWidth: Math.min(420, row.width * 0.36)
-            Layout.maximumWidth: Math.min(420, row.width * 0.36)
+            Layout.preferredWidth: Math.min(420, row.availableWidth * 0.36)
+            Layout.minimumWidth: Math.min(420, row.availableWidth * 0.36)
+            Layout.maximumWidth: Math.min(420, row.availableWidth * 0.36)
             spacing: 5
             RowLayout {
                 width: parent.width
@@ -83,7 +88,7 @@ Item {
             }
         }
     }
-    UiRule { width: parent.width; anchors.bottom: parent.bottom }
+    UiRule { width: row.availableWidth; x: row.contentInset; anchors.bottom: parent.bottom }
     TapHandler { acceptedButtons: Qt.RightButton; onTapped: actionsMenu.popup() }
     Menu {
         id: actionsMenu

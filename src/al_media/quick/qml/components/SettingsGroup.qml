@@ -6,6 +6,7 @@ ColumnLayout {
     id: group
     property alias title: heading.text
     property string headingName: ""
+    property bool stretchPanel: false
     default property alias rows: body.data
     spacing: 12
     UiText {
@@ -16,7 +17,9 @@ ColumnLayout {
         font.weight: Font.DemiBold
     }
     Rectangle {
+        objectName: group.objectName + "Panel"
         Layout.fillWidth: true
+        Layout.fillHeight: group.stretchPanel
         implicitHeight: body.implicitHeight + Theme.spaceMedium
         radius: 8
         color: Theme.surface

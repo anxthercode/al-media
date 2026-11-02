@@ -10,6 +10,7 @@ QtObject {
     readonly property int spaceMedium: 16
     readonly property int spaceLarge: 24
     readonly property int sectionSpace: 32
+    readonly property int contentMaxWidth: 1280
     readonly property color bg: light ? "#f8f8fb" : "#0c0c0e"
     readonly property color surface: light ? "#ffffff" : "#111114"
     readonly property color surface2: light ? "#f1f1f7" : "#17171b"

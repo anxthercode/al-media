@@ -16,6 +16,7 @@ ApplicationWindow {
     readonly property string globalError: services.feedback || (settings.state.error !== "concurrency_invalid" ? settings.state.error : "")
     readonly property bool compact: width <= 1100
     readonly property int pagePadding: compact ? 20 : 28
+    readonly property real contentInset: Math.max(pagePadding, (mainPane.width - Theme.contentMaxWidth) / 2)
     readonly property int headerHeight: height <= 760 ? 60 : 64
     readonly property real jobActionsWidth: Math.ceil(Math.max(actionMetrics.advanceWidth(t("open")) + 28 + 28 + 84,
                                                              actionMetrics.advanceWidth(t("retry")) + 16 + 42,
@@ -91,6 +92,7 @@ ApplicationWindow {
             }
         }
         ColumnLayout {
+            id: mainPane
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 0
@@ -99,9 +101,10 @@ ApplicationWindow {
                 Layout.preferredHeight: root.headerHeight
                 RowLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: root.pagePadding
-                    anchors.rightMargin: root.pagePadding
-                    UiText { text: root.t(services.page); font.pixelSize: 28; font.weight: Font.DemiBold; font.letterSpacing: -0.5; Layout.fillWidth: true; wrapMode: Text.NoWrap }
+                    objectName: "pageHeaderContent"
+                    anchors.leftMargin: root.contentInset
+                    anchors.rightMargin: root.contentInset
+                    UiText { objectName: "pageHeading"; text: root.t(services.page); font.pixelSize: 28; font.weight: Font.DemiBold; font.letterSpacing: -0.5; Layout.fillWidth: true; wrapMode: Text.NoWrap }
                     UiText { text: services.closing ? root.t("postprocessing") + "…" : root.globalError ? root.t(root.globalError) : ""; color: Theme.error; font.pixelSize: 12; Layout.maximumWidth: 420 }
                 }
                 UiRule { anchors.bottom: parent.bottom; width: parent.width }
@@ -227,7 +230,9 @@ ApplicationWindow {
             boundsBehavior: Flickable.StopAtBounds
             acceptedButtons: Qt.NoButton
             onContentHeightChanged: { if (contentY > Math.max(0, contentHeight - height)) contentY = Math.max(0, contentHeight - height); }
+            UiWheelHandler { scrollBar: licenseBar }
             ScrollBar.vertical: UiScrollBar {
+                id: licenseBar
                 objectName: "licenseScrollBar"
                 edge: true
                 scrollTarget: licenseScroll

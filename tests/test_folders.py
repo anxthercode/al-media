@@ -11,15 +11,16 @@ from al_media.core.folders import folder_path, inspect_folder
 from al_media.quick.viewmodels.settings import SettingsViewModel
 
 
-def test_folder_preview_is_read_only_and_apply_creates_nested_path(tmp_path):
+def test_missing_folder_is_rejected_without_creating_any_directories(tmp_path):
     destination = tmp_path / "Новая папка" / "Музыка"
     preview = inspect_folder(str(destination))
-    assert preview.state == "missing" and not preview.error and not destination.exists()
-    applied = inspect_folder(str(destination), create=True)
-    assert applied.state == "found" and applied.created and destination.is_dir()
+    assert preview.state == "missing" and preview.error == "folder_missing" and not destination.exists()
+    applied = inspect_folder(str(destination), verify_write=True)
+    assert applied.state == "missing" and applied.error == "folder_missing" and not destination.parent.exists()
+    destination.mkdir(parents=True)
+    existing = inspect_folder(str(destination), verify_write=True)
+    assert existing.state == "found" and not existing.error
     assert not list(destination.iterdir())  # The write probe cleans up its file.
-    existing = inspect_folder(str(destination), create=True)
-    assert not existing.created and not existing.error
 
 
 @pytest.mark.parametrize("value", ["", "Music", "C:Music", 'C:\\Bad<name', 'C:\\Music\\NUL', 'C:\\Music\\COM1.txt', '"C:\\Music. "', 'C:\\Music\\bad|name'])
@@ -50,7 +51,7 @@ def test_apply_checks_real_write_even_when_os_access_reports_success(tmp_path, m
     monkeypatch.setattr(folders.os, "access", lambda *_: True)
     monkeypatch.setattr(folders.tempfile, "TemporaryFile", denied)
     assert inspect_folder(str(tmp_path)).state == "found"
-    assert inspect_folder(str(tmp_path), create=True).error == "folder_denied"
+    assert inspect_folder(str(tmp_path), verify_write=True).error == "folder_denied"
 
 
 def test_background_preview_does_not_create_and_escape_retires_stale_result(qtbot, tmp_path, monkeypatch):
@@ -76,6 +77,7 @@ def test_background_preview_does_not_create_and_escape_retires_stale_result(qtbo
     heartbeat.stop()
     assert settings.preferences.folder == str(tmp_path) and settings.state["folderStatus"] == "idle"
     assert settings.state["folderDraft"] == str(tmp_path)
+    assert not destination.exists()
 
 
 def test_latest_folder_apply_wins_without_overwriting_other_preferences(qtbot, tmp_path, monkeypatch):
@@ -87,6 +89,8 @@ def test_latest_folder_apply_wins_without_overwriting_other_preferences(qtbot, t
         return original(value, **kwargs)
 
     monkeypatch.setattr(settings_module, "inspect_folder", slow)
+    (tmp_path / "Old").mkdir()
+    (tmp_path / "Latest").mkdir()
     settings.editFolder(str(tmp_path / "Old"))
     settings.applyFolder()
     settings.editFolder(str(tmp_path / "Latest"))
@@ -105,8 +109,21 @@ def test_failed_settings_save_keeps_previous_folder(qtbot, tmp_path, monkeypatch
         raise OSError("Settings unavailable")
 
     monkeypatch.setattr(Preferences, "save", fail)
+    (tmp_path / "Candidate").mkdir()
     settings.editFolder(str(tmp_path / "Candidate"))
     settings.applyFolder()
     qtbot.waitUntil(lambda: not settings.busy)
     assert settings.preferences.folder == str(tmp_path)
     assert settings.state["folderError"] == "settings_error"
+
+
+def test_missing_folder_cannot_replace_saved_folder_or_enter_recent_history(qtbot, tmp_path):
+    settings = SettingsViewModel(Preferences(folder=str(tmp_path), recent_folders=[str(tmp_path)]), persist=False)
+    missing = tmp_path / "Typo"
+    settings.editFolder(str(missing))
+    settings.applyFolder()
+    qtbot.waitUntil(lambda: not settings.busy)
+    assert settings.preferences.folder == str(tmp_path)
+    assert settings.state["folderError"] == "folder_missing"
+    assert settings.preferences.recent_folders == [str(tmp_path)]
+    assert not missing.exists()

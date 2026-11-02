@@ -12,7 +12,6 @@ class FolderCheck:
     path: str = ""
     state: str = "error"
     error: str = "folder_invalid"
-    created: bool = False
 
 
 def folder_path(value: str) -> Path:
@@ -32,33 +31,37 @@ def folder_path(value: str) -> Path:
     return path
 
 
-def inspect_folder(value: str, *, create: bool = False) -> FolderCheck:
-    """Read-only while typing; create and verify an actual write only on apply."""
+def inspect_folder(value: str, *, verify_write: bool = False) -> FolderCheck:
+    """Accept an existing directory; verify actual write access only on apply."""
     try:
         path = folder_path(value)
         if not Path(path.anchor).is_dir():
             return FolderCheck(error="folder_drive_unavailable")
         path = path.resolve()
-        exists = path.exists()
-        ancestor = path
-        while not ancestor.exists() and ancestor.parent != ancestor:
-            ancestor = ancestor.parent
-        if not ancestor.is_dir():
+        if not path.exists():
+            ancestor = path.parent
+            while not ancestor.exists() and ancestor.parent != ancestor:
+                ancestor = ancestor.parent
+            if not ancestor.is_dir():
+                return FolderCheck(error="folder_not_directory")
+            return FolderCheck(str(path), "missing", "folder_missing")
+        if not path.is_dir():
             return FolderCheck(error="folder_not_directory")
-        if not os.access(ancestor, os.W_OK):
+        if not os.access(path, os.W_OK):
             return FolderCheck(error="folder_denied")
-        if create:
-            path.mkdir(parents=True, exist_ok=True)
+        if verify_write:
             # os.access alone cannot establish effective Windows ACL access.
             # A private, automatically removed file verifies the real operation.
             with tempfile.TemporaryFile(prefix=".al-media-", dir=path) as probe:
                 probe.write(b"\0")
                 probe.flush()
-        return FolderCheck(str(path), "found" if exists or create else "missing", "", create and not exists)
+        return FolderCheck(str(path), "found", "")
     except (ValueError, RuntimeError):
         return FolderCheck(error="folder_invalid")
     except PermissionError:
         return FolderCheck(error="folder_denied")
+    except FileNotFoundError:
+        return FolderCheck(state="missing", error="folder_missing")
     except OSError as error:
         if getattr(error, "winerror", None) in {87, 123, 206}:
             return FolderCheck(error="folder_invalid")

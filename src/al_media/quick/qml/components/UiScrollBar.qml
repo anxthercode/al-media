@@ -11,6 +11,8 @@ ScrollBar {
     property string downText: qsTr("Scroll down")
     readonly property bool expanded: barHover.hovered || pressed
     readonly property real arrowExtent: edge ? 18 : 0
+    readonly property bool wheelAnimating: wheelAnimation.running
+    property real wheelDirection: 0
     implicitWidth: edge ? 14 : 8
     padding: edge ? 0 : 1
     // Reserve the arrow space in both states: revealing arrows never moves the
@@ -27,30 +29,84 @@ ScrollBar {
             if (arrow) arrow.stopRepeating();
         }
     }
+    function boundedOffset(offset) {
+        const first = scrollTarget.originY - scrollTarget.topMargin;
+        const last = Math.max(first, scrollTarget.originY + scrollTarget.contentHeight - scrollTarget.height + scrollTarget.bottomMargin);
+        return Math.max(first, Math.min(last, offset));
+    }
+    function stopWheel() {
+        wheelAnimation.stop();
+        wheelDirection = 0;
+    }
+    function stopInteractions() {
+        stopRepeating();
+        stopWheel();
+    }
     function scrollPixels(pixels) {
+        stopWheel();
         if (scrollTarget) {
             // The Flickable owns its offset. Do not write a second, normalized
             // position while it is still applying wheel/flick movement.
             scrollTarget.cancelFlick();
-            const first = scrollTarget.originY - scrollTarget.topMargin;
-            const last = Math.max(first, scrollTarget.originY + scrollTarget.contentHeight - scrollTarget.height + scrollTarget.bottomMargin);
-            scrollTarget.contentY = Math.max(first, Math.min(last, scrollTarget.contentY + pixels));
+            scrollTarget.contentY = boundedOffset(scrollTarget.contentY + pixels);
         } else {
             position = Math.max(0, Math.min(1 - size, position + pixels * size / Math.max(1, height)));
         }
     }
-    function scrollWheel(wheel) {
+    function animateWheel(pixels) {
+        if (!scrollTarget || Theme.reducedMotion) {
+            scrollPixels(pixels);
+            return;
+        }
+        // Accumulate rapid notches, but reverse from the visible position so an
+        // old destination cannot pull the page against the next wheel gesture.
+        const current = scrollTarget.contentY;
+        const continuing = wheelAnimation.running && wheelDirection * pixels > 0;
+        const destination = boundedOffset((continuing ? wheelAnimation.to : current) + pixels);
+        stopWheel();
+        scrollTarget.cancelFlick();
+        if (Math.abs(destination - current) < 0.01) return;
+        wheelDirection = pixels;
+        wheelAnimation.from = current;
+        wheelAnimation.to = destination;
+        wheelAnimation.start();
+    }
+    function scrollWheel(wheel, pixelDevice = false) {
         stopRepeating();
         const wheelStep = Application.styleHints.wheelScrollLines * 24;
-        scrollPixels(wheel.pixelDelta.y ? -wheel.pixelDelta.y : -wheel.angleDelta.y / 120 * wheelStep);
+        // A touchpad can report a rounded zero-pixel frame with an angle delta.
+        // Keep that frame still instead of treating it as a whole wheel notch.
+        const pixels = pixelDevice || wheel.pixelDelta.y ? -wheel.pixelDelta.y : -wheel.angleDelta.y / 120 * wheelStep;
+        if (pixelDevice || wheel.pixelDelta.y) {
+            // Precise gestures follow the finger directly, including zero-delta
+            // frames. They also interrupt a pending mouse-wheel animation.
+            scrollPixels(pixels);
+        } else if (pixels !== 0) animateWheel(pixels);
         wheel.accepted = true;
     }
-    onPressedChanged: { if (pressed) stopRepeating(); }
-    onVisibleChanged: { if (!visible) stopRepeating(); }
+    onPressedChanged: { if (pressed) stopInteractions(); }
+    onVisibleChanged: { if (!visible) stopInteractions(); }
+    onScrollTargetChanged: stopWheel()
+    NumberAnimation {
+        id: wheelAnimation
+        target: control.scrollTarget
+        property: "contentY"
+        duration: 160
+        easing.type: Easing.OutCubic
+    }
+    Connections {
+        target: control.scrollTarget
+        function onDraggingChanged() { if (target.dragging) control.stopWheel(); }
+        function onContentHeightChanged() { control.stopWheel(); }
+        function onHeightChanged() { control.stopWheel(); }
+        function onOriginYChanged() { control.stopWheel(); }
+        function onTopMarginChanged() { control.stopWheel(); }
+        function onBottomMarginChanged() { control.stopWheel(); }
+    }
     Connections {
         target: control.Window.window
-        function onActiveChanged() { if (!target.active) control.stopRepeating(); }
-        function onVisibilityChanged() { if (!target.visible || target.visibility === Window.Minimized) control.stopRepeating(); }
+        function onActiveChanged() { if (!target.active) control.stopInteractions(); }
+        function onVisibilityChanged() { if (!target.visible || target.visibility === Window.Minimized) control.stopInteractions(); }
     }
     HoverHandler { id: barHover }
     MouseArea {

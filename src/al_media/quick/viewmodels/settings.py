@@ -19,7 +19,7 @@ class _FolderWork(QRunnable):
         self.signals = _FolderSignals()
 
     def run(self):
-        check = inspect_folder(self.value, create=self.apply)
+        check = inspect_folder(self.value, verify_write=self.apply)
         self.signals.finished.emit((self.revision, self.apply, check))
 
 
@@ -58,8 +58,7 @@ class SettingsViewModel(QObject):
             "folderDraft": self._folder,
             "folderError": self._folder_error,
             "folderStatus": self._folder_state,
-            "folderMessage": self._folder_error or {"found": "folder_found", "missing": "folder_will_create", "checking": "folder_checking",
-                                                    "applying": "folder_checking", "saved": "folder_saved", "created": "folder_created"}.get(self._folder_state, ""),
+            "folderMessage": self._folder_error or {"checking": "folder_checking", "applying": "folder_checking", "saved": "folder_saved"}.get(self._folder_state, ""),
             "folderDirty": self._folder != self.preferences.folder,
             "error": self._error,
             "saved": self._saved,
@@ -69,7 +68,7 @@ class SettingsViewModel(QObject):
 
     def _clear_status(self):
         self._saved = ""
-        if self._folder_state in {"saved", "created"}:
+        if self._folder_state == "saved":
             self._folder_state = "found"
         self.changed.emit()
 
@@ -165,7 +164,7 @@ class SettingsViewModel(QObject):
                                     recent_folders=normalize_recent_folders([check.path, *self.preferences.recent_folders, self.preferences.folder]))
                 if self.commit(candidate):
                     self._folder = check.path
-                    self._folder_state = "created" if check.created else "saved"
+                    self._folder_state = "saved"
                     self.changed.emit()
                     self.folderApplied.emit()
                 else:

@@ -130,8 +130,8 @@ def main():
                 )
                 assert origin.x() >= -1 and origin.x() + obj.width() <= width + 1, (name, origin.x(), obj.width())
             if page == "about":
-                assert item("sourcesGrid").width() == item("aboutDivider").width()
-                assert item("allSourcesButton").property("horizontalPadding") >= 12
+                assert item("sourcesGrid").width() == item("aboutSources").width()
+                assert abs(item("allSourcesButtonText").mapToScene(QPointF()).x() - item("sourcesGrid").mapToScene(QPointF()).x()) < 1
         # License dialog, native rendering and keyboard close.
         QMetaObject.invokeMethod(root, "showLicenses")
         QTest.qWait(150)

@@ -7,7 +7,7 @@ Item {
     property string label: ""
     property bool switchRow: false
     default property alias controls: holder.data
-    property real controlWidth: Math.min(440, width * 0.48)
+    property real controlWidth: Math.min(520, width * 0.48)
     property real gap: width < 950 ? 24 : 32
     property real controlHeight: 48
     implicitHeight: Math.max(controlHeight, labelText.implicitHeight) + Theme.spaceMedium

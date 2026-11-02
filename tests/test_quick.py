@@ -320,7 +320,10 @@ def click(quick, name):
     obj = item(quick, name)
     if name == "licensesButton":
         scroll = item(quick, "aboutScroll")
-        scroll.setProperty("contentY", max(0, scroll.property("contentHeight") - scroll.height()))
+        top = obj.mapToScene(QPointF()).y()
+        viewport_top = scroll.mapToScene(QPointF()).y()
+        offset = min(0, top - viewport_top) + max(0, top + obj.height() - viewport_top - scroll.height())
+        scroll.setProperty("contentY", max(0, min(scroll.property("contentY") + offset, scroll.property("contentHeight") - scroll.height())))
         QTest.qWait(30)
     p = obj.mapToScene(QPointF(obj.width() / 2, obj.height() / 2)).toPoint()
     QTest.mouseClick(quick.window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, p)
@@ -457,7 +460,7 @@ def test_edge_scrollbar_arrows_hold_wheel_and_thumb_stay_within_track(quick, qtb
         event = QWheelEvent(pos, QPointF(quick.window.mapToGlobal(pos.toPoint())), pixels, angle,
                             Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
         QCoreApplication.sendEvent(quick.window, event)
-        qtbot.wait(20)
+        qtbot.waitUntil(lambda: not bar.property("wheelAnimating"))
         assert scroll.property("contentY") > before
     for end in (0.0, 1.0):
         bar.setProperty("position", end)
@@ -474,6 +477,7 @@ def test_edge_scrollbar_arrows_hold_wheel_and_thumb_stay_within_track(quick, qtb
     pos = thumb.mapToScene(QPointF(thumb.width() / 2, thumb.height() / 2))
     QCoreApplication.sendEvent(quick.window, QWheelEvent(pos, QPointF(quick.window.mapToGlobal(pos.toPoint())), QPoint(), QPoint(0, 120),
                                                      Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
+    qtbot.waitUntil(lambda: not bar.property("wheelAnimating"))
     assert scroll.property("contentY") < before
     assert not quick.warnings
 
@@ -497,6 +501,72 @@ def test_mode_switch_is_immediate_after_first_source_and_reverses_mid_animation(
     qtbot.waitUntil(lambda: composer.state["mode"] == "video")
     qtbot.wait(230)
     assert highlight.x() == 4
+    assert not quick.warnings
+
+
+@pytest.mark.parametrize("page,scroll_name", [("downloads", "downloadsScroll"), ("settings", "settingsScroll"), ("about", "aboutScroll")])
+@pytest.mark.parametrize("touchpad", [False, True])
+def test_empty_page_gutters_scroll_in_both_directions(quick, qtbot, page, scroll_name, touchpad):
+    from time import monotonic
+
+    from PySide6.QtCore import QCoreApplication, QPoint
+    from PySide6.QtGui import QInputDevice, QPointingDevice, QWheelEvent
+
+    for i in range(16):
+        task = Task(f"https://example.test/gutter/{i}", title="Downloaded file", state=State.COMPLETED)
+        quick.controller.scheduler.tasks[task.id] = task
+        quick.controller.scheduler.changed.emit(task)
+    if page == "about":
+        quick.window.setMinimumHeight(400)
+    quick.window.resize(1920, 400 if page == "about" else 700)
+    quick.controller.navigate(page)
+    qtbot.wait(80)
+    scroll = item(quick, scroll_name)
+    surface = item(quick, page + "Page")
+    assert scroll.width() == surface.width() and scroll.height() == surface.height()
+    inset = quick.window.property("contentInset")
+    points = [QPointF(inset / 2, surface.height() / 2), QPointF(surface.width() - max(18, inset / 2), surface.height() / 2),
+              QPointF(surface.width() / 2, 8), QPointF(surface.width() / 2, surface.height() - 8)]
+    device = QPointingDevice("Test touchpad", 101, QInputDevice.DeviceType.TouchPad, QPointingDevice.PointerType.Finger,
+                             QInputDevice.Capability.Position | QInputDevice.Capability.PixelScroll, 2, 0) if touchpad else None
+    bar = item(quick, {"downloads": "downloadsScrollBar", "settings": "settingsScrollBar", "about": "aboutScrollBar"}[page])
+
+    def send(local, amount):
+        position = surface.mapToScene(local)
+        global_position = QPointF(quick.window.mapToGlobal(position.toPoint()))
+        if touchpad:
+            frames = [(0, Qt.ScrollPhase.ScrollBegin), *[(amount // 3, Qt.ScrollPhase.ScrollUpdate), (0, Qt.ScrollPhase.ScrollUpdate)] * 3,
+                      (0, Qt.ScrollPhase.ScrollEnd)]
+            for delta, phase in frames:
+                angle = QPoint(0, amount * 2) if delta == 0 and phase == Qt.ScrollPhase.ScrollUpdate else QPoint()
+                event = QWheelEvent(position, global_position, QPoint(0, delta), angle, Qt.MouseButton.NoButton,
+                                    Qt.KeyboardModifier.NoModifier, phase, False, Qt.MouseEventSource.MouseEventSynthesizedBySystem, device)
+                event.setTimestamp(int(monotonic() * 1000))
+                QCoreApplication.sendEvent(quick.window, event)
+                qtbot.wait(16)
+        else:
+            event = QWheelEvent(position, global_position, QPoint(), QPoint(0, amount * 2), Qt.MouseButton.NoButton,
+                                Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+            event.setTimestamp(int(monotonic() * 1000))
+            QCoreApplication.sendEvent(quick.window, event)
+
+    for point in points:
+        QMetaObject.invokeMethod(scroll, "cancelFlick")
+        scroll.setProperty("contentY", scroll.property("originY") - scroll.property("topMargin"))
+        qtbot.wait(20)
+        before = scroll.property("contentY")
+        send(point, -60)
+        qtbot.waitUntil(lambda baseline=before: scroll.property("contentY") > baseline + 1, timeout=1000)
+        if touchpad:
+            last = scroll.property("originY") + scroll.property("contentHeight") - scroll.height() + scroll.property("bottomMargin")
+            assert abs(scroll.property("contentY") - min(last, before + 60)) < 1
+        qtbot.waitUntil(lambda: not bar.property("wheelAnimating"), timeout=2000)
+        qtbot.waitUntil(lambda: not scroll.property("moving"), timeout=2000)
+        before = scroll.property("contentY")
+        send(point, 60)
+        qtbot.waitUntil(lambda baseline=before: scroll.property("contentY") < baseline - 1, timeout=1000)
+        qtbot.waitUntil(lambda: not bar.property("wheelAnimating"), timeout=2000)
+        qtbot.waitUntil(lambda: not scroll.property("moving"), timeout=2000)
     assert not quick.warnings
 
 
@@ -562,10 +632,114 @@ def scroll_surface(quick, qtbot, page):
 
 
 def send_scroll_wheel(quick, position, delta=-120, *, pixels=0):
-    from PySide6.QtCore import QPoint
+    from time import monotonic
+
+    from PySide6.QtCore import QCoreApplication, QPoint
+    from PySide6.QtGui import QWheelEvent
 
     QTest.mouseMove(quick.window, position.toPoint())
-    QTest.wheelEvent(quick.window, position, QPoint(0, delta), QPoint(0, pixels))
+    # Deliver logical window coordinates directly. QTest.wheelEvent feeds the
+    # platform interface, which scales them again on Windows with display DPI.
+    event = QWheelEvent(position, QPointF(quick.window.mapToGlobal(position.toPoint())), QPoint(0, pixels), QPoint(0, delta),
+                        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+    event.setTimestamp(int(monotonic() * 1000))
+    QCoreApplication.sendEvent(quick.window, event)
+
+
+@pytest.mark.parametrize("page", ["downloads", "settings", "licenses"])
+def test_wheel_animation_accumulates_reverses_and_yields_to_precise_input(quick, qtbot, page):
+    from time import monotonic
+
+    from PySide6.QtCore import QCoreApplication, QPoint
+    from PySide6.QtGui import QWheelEvent
+
+    quick.window.setProperty("reducedMotion", False)
+    bar, scroll, parts = scroll_surface(quick, qtbot, page)
+    position = scroll.mapToScene(QPointF(scroll.width() / 2, scroll.height() / 2))
+
+    def send(delta=-120, pixels=0):
+        event = QWheelEvent(position, QPointF(quick.window.mapToGlobal(position.toPoint())), QPoint(0, pixels), QPoint(0, delta),
+                            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+        event.setTimestamp(int(monotonic() * 1000))
+        QCoreApplication.sendEvent(quick.window, event)
+
+    start = scroll.property("contentY")
+    send()
+    assert bar.property("wheelAnimating")
+    qtbot.wait(32)
+    intermediate = scroll.property("contentY")
+    assert start < intermediate < start + 72, "A notch must animate through intermediate offsets"
+    send()
+    qtbot.waitUntil(lambda: not bar.property("wheelAnimating"))
+    assert abs(scroll.property("contentY") - start - 144) < 1, "Rapid notches must retain their total distance"
+
+    send()
+    qtbot.wait(32)
+    turning = scroll.property("contentY")
+    send(120)
+    qtbot.waitUntil(lambda: not bar.property("wheelAnimating"))
+    assert abs(scroll.property("contentY") - (turning - 72)) < 1
+
+    send()
+    qtbot.wait(32)
+    precise_start = scroll.property("contentY")
+    send(0, pixels=-25)
+    assert not bar.property("wheelAnimating")
+    assert abs(scroll.property("contentY") - precise_start - 25) < 1
+    stopped = scroll.property("contentY")
+    qtbot.wait(200)
+    assert abs(scroll.property("contentY") - stopped) < 1, "A cancelled animation must not resume"
+
+    send()
+    qtbot.wait(32)
+    up = parts["scrollUp"]
+    arrow_center = up.mapToScene(QPointF(up.width() / 2, up.height() / 2)).toPoint()
+    QTest.mouseMove(quick.window, scroll.mapToScene(QPointF(60, 60)).toPoint(), delay=0)
+    QTest.mouseMove(quick.window, arrow_center)
+    qtbot.wait(16)
+    assert up.isVisible()
+    before_arrow = scroll.property("contentY")
+    QTest.mouseClick(quick.window, Qt.MouseButton.LeftButton, pos=arrow_center, delay=0)
+    assert not bar.property("wheelAnimating")
+    assert abs(scroll.property("contentY") - before_arrow + 40) < 1
+    stopped = scroll.property("contentY")
+    qtbot.wait(200)
+    assert abs(scroll.property("contentY") - stopped) < 1
+
+    quick.window.setProperty("reducedMotion", True)
+    before = scroll.property("contentY")
+    send(120)
+    assert not bar.property("wheelAnimating")
+    assert abs(scroll.property("contentY") - max(start, before - 72)) < 1
+    assert not quick.warnings
+
+
+def test_folder_uses_no_default_context_menu_and_source_menu_still_works(quick, qtbot):
+    quick.controller.navigate("settings")
+    qtbot.wait(50)
+    field = item(quick, "downloadFolder")
+    center = field.mapToScene(QPointF(field.width() / 2, field.height() / 2)).toPoint()
+    QTest.mouseClick(quick.window, Qt.MouseButton.RightButton, pos=center)
+    qtbot.wait(50)
+    assert not any(obj.inherits("QQuickMenu") and obj.property("visible") for obj in quick.window.findChildren(QObject))
+    field.forceActiveFocus()
+    QTest.keyClick(quick.window, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+    QTest.keyClick(quick.window, Qt.Key.Key_D)
+    assert field.property("text") == "d"
+    QTest.keyClick(quick.window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert field.property("text") != "d"
+    QTest.keyClick(quick.window, Qt.Key.Key_Escape)
+    quick.controller.navigate("downloads")
+    qtbot.wait(50)
+    source = item(quick, "sourceUrl")
+    center = source.mapToScene(QPointF(source.width() / 2, source.height() / 2)).toPoint()
+    QTest.mouseClick(quick.window, Qt.MouseButton.RightButton, pos=center)
+    menu = quick.window.findChild(QObject, "sourceContextMenu")
+    qtbot.waitUntil(lambda: menu.property("visible"))
+    assert menu.property("count") == 2
+    QTest.keyClick(quick.window, Qt.Key.Key_Escape)
+    qtbot.waitUntil(lambda: not menu.property("visible"))
+    assert not quick.warnings
 
 
 @pytest.mark.parametrize("theme", ["dark", "light"])
@@ -839,6 +1013,16 @@ def test_native_geometry_and_compact_navigation(quick, qtbot, size):
         origin = obj.mapToScene(QPointF())
         assert origin.x() >= 0 and origin.x() + obj.width() <= size[0]
     assert item(quick, "downloadButton").width() == item(quick, "configuration").width()
+    configuration = item(quick, "configuration")
+    preview = item(quick, "mediaPreview")
+    workspace = item(quick, "workbench")
+    gap = preview.mapToScene(QPointF()).x() - configuration.mapToScene(QPointF(configuration.width(), 0)).x()
+    assert 400 <= configuration.width() <= 640
+    assert 360 <= preview.width() <= 592
+    assert gap >= 24
+    if workspace.width() >= 1200:
+        assert configuration.width() >= 599 and preview.width() >= 553
+        assert 48 <= gap <= 64
     y = item(quick, "downloadButton").mapToScene(QPointF()).y()
     quick.controller.composer.toggleRange()
     assert item(quick, "downloadButton").mapToScene(QPointF()).y() == y
@@ -848,6 +1032,63 @@ def test_native_geometry_and_compact_navigation(quick, qtbot, size):
     assert item(quick, "concurrencyField").property("leftPadding") == item(quick, "downloadFolder").property("leftPadding") == 14
     click(quick, "navAbout")
     assert quick.controller.page == "about"
+    assert not quick.warnings
+
+
+@pytest.mark.parametrize("dimensions", [(1920, 1080), (800, 800), (720, 1280)])
+def test_preview_keeps_16_9_bounds_and_original_media_proportions(quick, qtbot, dimensions):
+    from PySide6.QtGui import QImage
+
+    composer = quick.controller.composer
+    prepared(composer)
+    image = QImage(*dimensions, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.darkCyan)
+    quick.controller.media._source = quick.preview.put(image)
+    quick.controller.media.changed.emit()
+    poster, preview = item(quick, "previewImage"), item(quick, "mediaPreview")
+    qtbot.waitUntil(lambda: poster.property("paintedHeight") > 0)
+    for width, height in ((1024, 700), (1536, 840)):
+        quick.window.resize(width, height)
+        for mode in ("video", "audio"):
+            composer.setMode(mode)
+            for title in ("Short title", "A longer video title that wraps naturally across the action panel " * 2):
+                composer.task.title = title
+                composer.changed.emit()
+                qtbot.wait(60)
+                assert abs(preview.width() / preview.height() - 16 / 9) < 0.001
+                painted_width, painted_height = poster.property("paintedWidth"), poster.property("paintedHeight")
+                assert abs(painted_width / painted_height - dimensions[0] / dimensions[1]) < 0.001
+                assert painted_width <= preview.width() + 1 and painted_height <= preview.height() + 1
+                assert min(abs(painted_width - preview.width()), abs(painted_height - preview.height())) < 1
+                if dimensions == (1920, 1080):
+                    assert abs(painted_width - preview.width()) < 1 and abs(painted_height - preview.height()) < 1
+    assert not quick.warnings
+
+
+@pytest.mark.parametrize("size", [(1024, 700), (1280, 800), (1920, 1080), (2560, 1440)])
+def test_pages_share_content_bounds_with_header_and_download_rows(quick, qtbot, size):
+    quick.window.resize(*size)
+    prepared(quick.controller.composer)
+    row = Task("https://example.test/layout", title="A queued download", state=State.DOWNLOADING)
+    quick.controller.scheduler.tasks[row.id] = row
+    quick.controller.scheduler.changed.emit(row)
+    for page, content_name in (("downloads", "downloadsContent"), ("settings", "settingsContent"), ("about", "aboutContent")):
+        quick.controller.navigate(page)
+        qtbot.wait(50)
+        content = item(quick, content_name)
+        header = item(quick, "pageHeaderContent")
+        heading = item(quick, "pageHeading")
+        left = content.mapToScene(QPointF()).x()
+        assert abs(left - heading.mapToScene(QPointF()).x()) < 1
+        assert abs(content.width() - header.width()) < 1
+        assert content.width() <= 1280
+        assert left >= 20 and left + content.width() < size[0]
+        if page == "downloads":
+            assert item(quick, "sourceUrl").width() == content.width()
+            download = item(quick, "downloadRowContent-" + row.id)
+            assert download.width() == content.width()
+            preview = item(quick, "mediaPreview")
+            assert abs(preview.mapToScene(QPointF(preview.width(), 0)).x() - (left + content.width())) < 1
     assert not quick.warnings
 
 
@@ -1237,11 +1478,13 @@ def test_analysis_spinner_is_large_and_rotates_with_platform_effects_disabled(qu
     assert not quick.warnings
 
 
-@pytest.mark.parametrize("name", ["play", "retry", "youtube", "spinner", "trim", "settings", "captions", "folderOpen", "reddit", "soundcloud", "twitch", "link"])
+@pytest.mark.parametrize("name", ["play", "retry", "youtube", "spinner", "trim", "settings", "captions", "folderOpen", "reddit", "soundcloud", "twitch", "link", "pinterest", "bandcamp",
+                                  "about-media", "about-timeline", "about-range", "about-queue"])
 def test_tinted_icons_render_including_svg_with_leading_license_comments(qapp, name):
     provider = IconProvider(Path(__file__).parents[1] / "src/al_media/quick/qml/icons")
-    rendered = provider.requestImage(name + "/4f7ef8", QSize(), QSize(32, 32))
-    assert any(rendered.pixelColor(x, y).alpha() > 100 for x in range(32) for y in range(32)), name
+    dimensions = QSize(144, 64) if name.startswith("about-") else QSize(32, 32)
+    rendered = provider.requestImage(name + "/4f7ef8", QSize(), dimensions)
+    assert any(rendered.pixelColor(x, y).alpha() > 100 for x in range(rendered.width()) for y in range(rendered.height())), name
 
 
 @pytest.mark.parametrize("side", [24, 30, 36, 48])
@@ -1309,6 +1552,115 @@ def test_empty_and_loading_copy_matches_phase_without_empty_queue(quick, qtbot):
     quick.controller.scheduler.changed.emit(task)
     qtbot.wait(30)
     assert item(quick, "queueHeading").isVisible()
+    assert not quick.warnings
+
+
+@pytest.mark.parametrize("size", [(1024, 640), (1280, 720), (1536, 793)])
+@pytest.mark.parametrize("language", ["ru", "en", "be", "uk"])
+def test_source_messages_keep_heading_and_help_aligned_across_states(quick, qtbot, size, language):
+    quick.window.resize(*size)
+    quick.controller.settings.setValue("language", language)
+    composer = quick.controller.composer
+    qtbot.wait(60)
+    scroll = item(quick, "downloadsScroll")
+    heading, help_text = item(quick, "composerHeading"), item(quick, "composerHelp")
+    initial = [obj.mapToScene(QPointF()) for obj in (heading, help_text)]
+    viewport = scroll.mapToScene(QPointF())
+    assert abs(initial[0].y() + heading.height() / 2 - (viewport.y() + scroll.height() / 2)) < 24
+
+    for history in (False, True):
+        if history:
+            task = Task("https://example.test/saved", title="Saved download", state=State.INTERRUPTED)
+            quick.controller.scheduler.tasks[task.id] = task
+            quick.controller.scheduler.changed.emit(task)
+        for source, phase in (("", "empty"), ("https://example.test/video", "loading"),
+                              ("https://www.youtube.com/watch?v=abc&list=PL123", "choice"),
+                              ("https://example.test/a\nhttps://example.test/b", "batch"),
+                              ("https://example.test/error", "error")):
+            composer.setUrl(source)
+            composer.timer.stop()
+            if phase == "error":
+                composer._fail("error_unavailable")
+            qtbot.wait(30)
+            assert composer.state["phase"] == phase
+            for obj, original in zip((heading, help_text), initial, strict=True):
+                position = obj.mapToScene(QPointF())
+                assert abs(position.y() - original.y()) < 1
+                assert abs(position.x() + obj.width() / 2 - (viewport.x() + scroll.width() / 2)) < 1
+            assert heading.property("implicitWidth") <= heading.width()
+            if phase == "loading":
+                spinner = item(quick, "analysisSpinner")
+                top = spinner.mapToScene(QPointF()).y()
+                assert top >= item(quick, "sourceUrl").mapToScene(QPointF()).y() + item(quick, "sourceUrl").height()
+                assert top + spinner.height() < initial[0].y()
+            if phase in {"choice", "batch"} and history:
+                action = item(quick, "onlyVideo" if phase == "choice" else "downloadBatch")
+                assert action.mapToScene(QPointF()).y() + action.height() < item(quick, "queueHeading").mapToScene(QPointF()).y()
+        prepared(composer)
+        qtbot.wait(40)
+        composer.setUrl("")
+        qtbot.wait(40)
+        assert abs(heading.mapToScene(QPointF()).y() - initial[0].y()) < 1
+    assert not quick.warnings
+
+
+@pytest.mark.parametrize("size", [(1024, 700), (1280, 720), (1536, 793)])
+def test_queue_position_survives_source_analysis_and_clearing(quick, qtbot, size):
+    quick.window.resize(*size)
+    composer = quick.controller.composer
+    history = Task("https://example.test/history", title="Saved download", state=State.COMPLETED)
+    quick.controller.scheduler.tasks[history.id] = history
+    quick.controller.scheduler.changed.emit(history)
+    qtbot.wait(60)
+
+    def heading_y():
+        return item(quick, "queueHeading").mapToScene(QPointF()).y()
+
+    initial = heading_y()
+    initial_height = item(quick, "workbench").height()
+    for url, phase in (("https://example.test/video", "loading"),
+                       ("https://www.youtube.com/watch?v=abc&list=PL123", "choice"),
+                       ("https://example.test/a\nhttps://example.test/b", "batch"), ("", "empty")):
+        composer.setUrl(url)
+        composer.timer.stop()
+        qtbot.wait(40)
+        assert composer.state["phase"] == phase
+        assert abs(heading_y() - initial) < 1
+    prepared(composer)
+    qtbot.wait(60)
+    assert abs(heading_y() - initial) < 1
+    composer.setMode("audio")
+    composer.toggleRange()
+    qtbot.wait(40)
+    assert abs(heading_y() - initial) < 1
+    composer.setUrl("")
+    qtbot.wait(40)
+    assert abs(heading_y() - initial) < 1
+    composer.setUrl("https://example.test/error")
+    composer.timer.stop()
+    composer._fail("error_unavailable")
+    qtbot.wait(40)
+    assert abs(heading_y() - initial) < 1
+    composer._ready(composer._generation, Task("https://example.test/playlist"), {
+        "_type": "playlist", "title": "Playlist", "extractor_key": "YoutubeTab", "entries": [
+            {"title": "One", "url": "https://example.test/one"},
+        ]})
+    qtbot.wait(60)
+    assert composer.state["isPlaylist"] and abs(heading_y() - initial) < 1
+    composer.setUrl("")
+    qtbot.wait(40)
+    assert abs(heading_y() - initial) < 1
+    info = deepcopy(INFO)
+    info["title"] = "A longer video title with more details " * 5
+    composer._ready(composer._generation, Task("https://example.test/long"), info)
+    qtbot.wait(60)
+    expanded = heading_y()
+    expanded_height = item(quick, "workbench").height()
+    assert expanded_height > initial_height
+    composer.setUrl("")
+    qtbot.wait(40)
+    assert item(quick, "workbench").height() == expanded_height
+    assert abs(heading_y() - expanded) < 1
     assert not quick.warnings
 
 
@@ -1412,7 +1764,7 @@ def test_recent_dropdown_does_not_apply_draft_when_opened(quick, qtbot, tmp_path
     qtbot.waitUntil(lambda: menu.property("opened"))
     qtbot.wait(450)
     assert settings.preferences.folder == str(tmp_path) and not draft.exists()
-    assert item(quick, "folderError").property("text") == text(settings.preferences.language, "folder_will_create")
+    assert item(quick, "folderError").property("text") == text(settings.preferences.language, "folder_missing")
     if keyboard:
         QTest.keyClick(quick.window, Qt.Key.Key_Down)
         QTest.keyClick(quick.window, Qt.Key.Key_Return)
@@ -1426,11 +1778,13 @@ def test_recent_dropdown_does_not_apply_draft_when_opened(quick, qtbot, tmp_path
 
 
 @pytest.mark.parametrize("language", ["ru", "en", "be", "uk"])
-def test_about_features_fit_and_relocated_licenses_open_in_every_language(quick, qtbot, language):
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_about_features_fit_and_relocated_licenses_open_in_every_language(quick, qtbot, language, theme):
     quick.controller.settings.setValue("language", language)
+    quick.controller.settings.setValue("theme", theme)
     quick.controller.navigate("about")
-    for width in (1024, 1280, 1920):
-        quick.window.resize(width, 720)
+    for width, height in ((1024, 720), (1280, 720), (1280, 760), (1536, 792), (1536, 840), (1920, 1080)):
+        quick.window.resize(width, height)
         qtbot.wait(50)
         grid = item(quick, "aboutFeatures")
         for key in ("media", "fragments", "queue", "files"):
@@ -1438,8 +1792,38 @@ def test_about_features_fit_and_relocated_licenses_open_in_every_language(quick,
             point = feature.mapToScene(QPointF())
             assert point.x() >= 0 and point.x() + feature.width() <= width
             assert feature.height() > 30 and feature.width() <= grid.width()
-            texts = [child.property("text") for child in feature.findChildren(QQuickItem) if child.property("text") is not None]
-            assert len(texts) == 2 and all(text and not text.startswith("about_") for text in texts)
+            illustration = item(quick, feature.objectName() + "Illustration")
+            for suffix in ("Title", "Description"):
+                label = item(quick, feature.objectName() + suffix)
+                assert label.property("text") and not label.property("text").startswith("about_")
+                assert label.property("paintedWidth") <= label.width() + 1
+                assert label.mapToScene(QPointF()).x() + label.width() + 23 <= illustration.mapToScene(QPointF()).x()
+                assert label.mapToScene(QPointF(0, label.height())).y() <= point.y() + feature.height()
+        link = item(quick, "allSourcesButtonText")
+        sources = item(quick, "sourcesGrid")
+        assert abs(sources.width() - item(quick, "aboutSources").width()) < 1
+        assert abs(link.mapToScene(QPointF()).x() - sources.mapToScene(QPointF()).x()) < 1
+        assert not quick.window.findChild(QQuickItem, "sourcesAvailability")
+        version = item(quick, "aboutVersion")
+        licenses = item(quick, "licensesButtonText")
+        assert version.property("font").pixelSize() == licenses.property("font").pixelSize() == 12
+        assert abs(version.mapToScene(QPointF()).y() - licenses.mapToScene(QPointF()).y()) < 1
+        names = ("youtube", "facebook", "instagram", "twitch", "pinterest", "tiktok", "soundcloud", "x-twitter", "reddit", "bandcamp")
+        cells = [item(quick, "source-" + name) for name in names]
+        assert max(cell.width() for cell in cells) - min(cell.width() for cell in cells) <= 1  # Whole-pixel rounding.
+        columns = sources.property("columns")
+        for i, cell in enumerate(cells):
+            assert abs(cell.x() - cells[i % columns].x()) < 1
+        assert abs(cells[0].x()) < 1
+        assert abs(cells[columns - 1].x() + cells[columns - 1].width() - sources.width()) < 1
+        assert grid.mapToScene(QPointF(0, grid.height())).y() < sources.mapToScene(QPointF()).y()
+        assert item(quick, "aboutDeveloper").mapToScene(QPointF()).y() > link.mapToScene(QPointF(0, link.height())).y()
+        if width >= 1280 and height >= 760:
+            scroll = item(quick, "aboutScroll")
+            assert scroll.property("contentHeight") <= scroll.height() + 1, "The full About page should fit a maximized Full HD window"
+            bar = item(quick, "aboutScrollBar")
+            assert bar.property("size") >= 1
+            assert bar.findChild(QQuickItem, "scrollThumb").property("opacity") == 0
     quick.window.resize(1280, 720)
     qtbot.wait(50)
     click(quick, "licensesButton")
@@ -1581,7 +1965,8 @@ def test_manual_folder_commits_on_enter_and_escape_restores_saved_path(quick, qt
     settings = quick.controller.settings
     original = settings.preferences.folder
     field = item(quick, "downloadFolder")
-    destination = str(tmp_path / "Новая папка")
+    destination = str(tmp_path / "Выбранная папка")
+    Path(destination).mkdir()
     field.forceActiveFocus()
     QTest.keyClick(quick.window, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
     from PySide6.QtGui import QInputMethodEvent
@@ -1591,11 +1976,11 @@ def test_manual_folder_commits_on_enter_and_escape_restores_saved_path(quick, qt
     paste.setCommitString(destination)
     QApplication.sendEvent(quick.window, paste)
     assert settings.state["folderDraft"] == destination and settings.preferences.folder == original
-    assert not Path(destination).exists()
+    assert Path(destination).is_dir()
     QTest.keyClick(quick.window, Qt.Key.Key_Return)
     qtbot.waitUntil(lambda: settings.preferences.folder == destination and not field.hasActiveFocus())
     assert Path(destination).is_dir()
-    assert settings.state["folderStatus"] == "created"
+    assert settings.state["folderStatus"] == "saved"
     field.forceActiveFocus()
     settings.editFolder(str(tmp_path / "Отменено"))
     QTest.keyClick(quick.window, Qt.Key.Key_Escape)
@@ -1623,15 +2008,17 @@ def test_manual_folder_invalid_or_unwritable_preserves_saved_destination(schedul
     assert settings.preferences.folder == original and occupied.read_text(encoding="utf-8") == "keep"
 
 
-def test_invalid_folder_keeps_editing_focus_until_escape(quick, qtbot):
+@pytest.mark.parametrize("missing", [False, True])
+def test_invalid_folder_keeps_editing_focus_until_escape(quick, qtbot, tmp_path, missing):
     quick.controller.changeFolder()
     qtbot.wait(40)
     settings = quick.controller.settings
     field = item(quick, "downloadFolder")
     original = settings.preferences.folder
-    settings.editFolder("relative/path")
+    value = str(tmp_path / "Typo") if missing else "relative/path"
+    settings.editFolder(value)
     QTest.keyClick(quick.window, Qt.Key.Key_Return)
-    qtbot.waitUntil(lambda: settings.state["folderError"] == "folder_invalid")
+    qtbot.waitUntil(lambda: settings.state["folderError"] == ("folder_missing" if missing else "folder_invalid"))
     assert field.hasActiveFocus() and settings.preferences.folder == original
     QTest.keyClick(quick.window, Qt.Key.Key_Escape)
     assert not field.hasActiveFocus() and settings.state["folderDraft"] == original

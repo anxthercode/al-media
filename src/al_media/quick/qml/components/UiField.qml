@@ -20,6 +20,7 @@ TextField {
     verticalAlignment: TextInput.AlignVCenter
     selectByMouse: true
     hoverEnabled: true
+    ContextMenu.menu: null
     onActiveFocusChanged: { if (!activeFocus) deselect(); }
     background: Rectangle {
         radius: 6

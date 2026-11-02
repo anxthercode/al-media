@@ -9,10 +9,10 @@ FocusScope {
     id: page
     required property var ui
     readonly property var prefs: ui.settings.state
-    readonly property string folderNotice: prefs.folderError || (prefs.folderStatus === "missing" && prefs.folderDirty ? "folder_will_create" : "")
+    readonly property string folderNotice: prefs.folderError
     property bool choosingRecent: false
     function focusFolder() {
-        const folderY = folderGroup.mapToItem(content, 0, 0).y;
+        const folderY = folderGroup.mapToItem(flick.contentItem, 0, 0).y;
         flick.contentY = Math.max(0, Math.min(folderY - 20, flick.contentHeight - flick.height));
         folderField.forceActiveFocus();
     }
@@ -43,15 +43,15 @@ FocusScope {
         objectName: "settingsScroll"
         acceptedButtons: Qt.NoButton
         anchors.fill: parent
-        anchors.leftMargin: ui.pagePadding
-        anchors.rightMargin: ui.pagePadding
-        anchors.topMargin: 20
-        anchors.bottomMargin: 24
         clip: true
         contentWidth: width
-        contentHeight: content.implicitHeight
+        contentHeight: content.implicitHeight + Theme.spaceLarge * 2
         boundsBehavior: Flickable.StopAtBounds
+        UiWheelHandler {
+            scrollBar: settingsBar
+        }
         ScrollBar.vertical: UiScrollBar {
+            id: settingsBar
             objectName: "settingsScrollBar"
             parent: page
             edge: true
@@ -65,7 +65,10 @@ FocusScope {
         }
         ColumnLayout {
             id: content
-            width: Math.min(1000, flick.width - 10)
+            objectName: "settingsContent"
+            x: ui.contentInset
+            y: Theme.spaceLarge
+            width: flick.width - ui.contentInset * 2
             spacing: Theme.spaceLarge
             SettingsGroup {
                 objectName: "appearanceSettingsGroup"
@@ -316,7 +319,7 @@ FocusScope {
                     Item {
                         objectName: "folderFeedback"
                         visible: page.folderNotice.length > 0
-                        Layout.preferredWidth: Math.min(440, parent.width * 0.48)
+                        Layout.preferredWidth: Math.min(520, parent.width * 0.48)
                         Layout.alignment: Qt.AlignRight
                         Layout.preferredHeight: folderFeedbackText.implicitHeight + Theme.spaceSmall
                         UiText {
@@ -359,7 +362,7 @@ FocusScope {
                 }
                 UiText {
                     objectName: "concurrencyError"
-                    Layout.preferredWidth: Math.min(440, content.width * 0.48)
+                    Layout.preferredWidth: Math.min(520, parent.width * 0.48)
                     Layout.alignment: Qt.AlignRight
                     text: ui.t("concurrency_invalid")
                     visible: page.prefs.numberInvalid
